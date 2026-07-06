@@ -99,6 +99,12 @@ abstract class LlmProvider {
   /// immediately stopped and buffers cleared.
   Stream<void> get interruptionStream;
 
+  /// Stream of turn-complete events.
+  /// Emits when the model has finished generating its response for
+  /// the current turn, signalling that buffered audio/text should be
+  /// committed and played back.
+  Stream<void> get turnCompleteStream;
+
   /// Disconnect and clean up
   Future<void> disconnect();
 }

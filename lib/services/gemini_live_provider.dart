@@ -51,6 +51,7 @@ class GeminiLiveProvider implements LlmProvider {
   final _connectionStateController =
       StreamController<ConnectionState>.broadcast();
   final _interruptionStreamController = StreamController<void>.broadcast();
+  final _turnCompleteStreamController = StreamController<void>.broadcast();
 
   GeminiLiveProvider({
     required LlmConfig llmConfig,
@@ -81,6 +82,10 @@ class GeminiLiveProvider implements LlmProvider {
   @override
   Stream<void> get interruptionStream =>
       _interruptionStreamController.stream;
+
+  @override
+  Stream<void> get turnCompleteStream =>
+      _turnCompleteStreamController.stream;
 
   // ── Connection Management ──
 
@@ -203,13 +208,19 @@ class GeminiLiveProvider implements LlmProvider {
       case gai.BidiGenerateContentServerContent(
             :final modelTurn,
             :final interrupted,
+            :final turnComplete,
           ):
         // Handle barge-in: user interrupted the model mid-response
         if (interrupted == true) {
           _log.info('Model interrupted by user speech (barge-in)');
           _interruptionStreamController.add(null);
         }
-        _log.info('ServerContent: modelTurn=${modelTurn != null}, parts=${modelTurn?.parts.length ?? 0}, interrupted=$interrupted');
+        // Signal turn completion so audio/text can be committed
+        if (turnComplete == true) {
+          _log.info('Model turn complete — signalling commit');
+          _turnCompleteStreamController.add(null);
+        }
+        _log.info('ServerContent: modelTurn=${modelTurn != null}, parts=${modelTurn?.parts.length ?? 0}, interrupted=$interrupted, turnComplete=$turnComplete');
         if (modelTurn != null) {
           for (final part in modelTurn.parts) {
             _log.info('  Part: ${part.runtimeType}');
@@ -330,6 +341,7 @@ class GeminiLiveProvider implements LlmProvider {
     await _toolCallStreamController.close();
     await _connectionStateController.close();
     await _interruptionStreamController.close();
+    await _turnCompleteStreamController.close();
     _client.close();
   }
 

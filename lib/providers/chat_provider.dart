@@ -90,6 +90,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   StreamSubscription? _connectionSub;
   StreamSubscription? _audioSub;
   StreamSubscription? _interruptSub;
+  StreamSubscription? _turnCompleteSub;
 
   // Audio playback
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -189,6 +190,12 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         }
       });
 
+      // Wire up turn-complete stream — auto-commit when model finishes generating
+      _turnCompleteSub = llmProvider.turnCompleteStream.listen((_) {
+        _log.info('Turn complete — committing response');
+        _commitResponse();
+      });
+
       // Connect to Gemini Live with all tools (AFTER setting up listeners)
       final toolDeclarations =
           toolRegistry.map((t) => t.toDeclaration()).toList();
@@ -244,6 +251,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     await _connectionSub?.cancel();
     await _audioSub?.cancel();
     await _interruptSub?.cancel();
+    await _turnCompleteSub?.cancel();
 
     final llmProvider = _ref.read(llmProviderProvider);
     await llmProvider.disconnect();

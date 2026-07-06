@@ -94,10 +94,13 @@ final setAlarmTool = ToolDefinition(
       await Alarm.set(
         alarmSettings: AlarmSettings(
           id: alarmId,
-          alarmDateTime: alarmTime,
+          dateTime: alarmTime,
           assetAudioPath: null, // Use default system alarm sound
-          notificationTitle: 'J.A.R.V.I.S. Alarm',
-          notificationBody: label,
+          volumeSettings: const VolumeSettings.fixed(),
+          notificationSettings: NotificationSettings(
+            title: 'J.A.R.V.I.S. Alarm',
+            body: label,
+          ),
         ),
       );
 
