@@ -1,5 +1,6 @@
 // lib/main.dart — J.A.R.V.I.S. Phase 1 Entry Point
 
+import 'package:alarm/alarm.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -29,6 +30,9 @@ Future<void> main() async {
 
   // Load environment configuration from .env
   await dotenv.load();
+
+  // Initialize alarm service for in-app alarm tools
+  await Alarm.init();
 
   runApp(
     const ProviderScope(

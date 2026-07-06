@@ -5,6 +5,7 @@
 
 import 'dart:async';
 
+import 'package:alarm/alarm.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
@@ -61,16 +62,60 @@ final setAlarmTool = ToolDefinition(
     final timeStr = args['time'] as String;
     final label = args['label'] as String? ?? 'J.A.R.V.I.S. Alarm';
 
-    // TODO: Integrate with `alarm` package when platform channel work is done
-    // await Alarm.set(alarmTime: alarmTime, label: label, ...);
+    // Parse HH:mm
+    final parts = timeStr.split(':');
+    if (parts.length != 2) {
+      return {
+        'success': false,
+        'error': 'Invalid time format. Use HH:mm (24-hour), e.g. "08:30"',
+      };
+    }
 
-    return {
-      'success': true,
-      'message': 'Alarm set for $timeStr',
-      'time': timeStr,
-      'label': label,
-      'note': 'Alarm package integration pending platform setup',
-    };
+    final hour = int.tryParse(parts[0]);
+    final minute = int.tryParse(parts[1]);
+    if (hour == null || minute == null || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return {
+        'success': false,
+        'error': 'Invalid time values. Hour 0-23, minute 0-59.',
+      };
+    }
+
+    // Use a unique ID based on current timestamp to avoid collisions
+    final alarmId = DateTime.now().millisecondsSinceEpoch;
+
+    final now = DateTime.now();
+    var alarmTime = DateTime(now.year, now.month, now.day, hour, minute);
+    // If the time has already passed today, schedule for tomorrow
+    if (alarmTime.isBefore(now)) {
+      alarmTime = alarmTime.add(const Duration(days: 1));
+    }
+
+    try {
+      await Alarm.set(
+        alarmSettings: AlarmSettings(
+          id: alarmId,
+          alarmDateTime: alarmTime,
+          assetAudioPath: null, // Use default system alarm sound
+          notificationTitle: 'J.A.R.V.I.S. Alarm',
+          notificationBody: label,
+        ),
+      );
+
+      return {
+        'success': true,
+        'message': 'Alarm set for $timeStr',
+        'alarm_id': alarmId,
+        'time': timeStr,
+        'label': label,
+        'alarm_time_iso': alarmTime.toIso8601String(),
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': 'Failed to set alarm: $e',
+        'time': timeStr,
+      };
+    }
   },
 );
 
@@ -125,13 +170,18 @@ final cancelAlarmTool = ToolDefinition(
   executor: (args) async {
     final alarmId = args['alarm_id'] as int;
 
-    // TODO: Integrate with alarm package
-    // await Alarm.cancel(alarmId);
-
-    return {
-      'success': true,
-      'message': 'Alarm $alarmId cancelled',
-    };
+    try {
+      await Alarm.stop(alarmId);
+      return {
+        'success': true,
+        'message': 'Alarm $alarmId cancelled',
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': 'Failed to cancel alarm $alarmId: $e',
+      };
+    }
   },
 );
 

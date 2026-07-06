@@ -416,15 +416,8 @@ class _SettingsScreenState extends ConsumerState<_SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final authState = ref.watch(authStateProvider);
     final authNotifier = ref.watch(authStateProvider.notifier);
     final authService = ref.watch(authServiceProvider);
-
-    final isBiometricEnabled = switch (authState) {
-      AuthState.locked => true,
-      AuthState.authenticated => true,
-      _ => false,
-    };
 
     return Scaffold(
       backgroundColor: theme.colorScheme.surface,
@@ -454,10 +447,16 @@ class _SettingsScreenState extends ConsumerState<_SettingsScreen> {
           const SizedBox(height: 8),
           Card(
             color: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
-            child: FutureBuilder<bool>(
-              future: authService.isBiometricAvailable,
+            child: FutureBuilder<({bool available, bool enabled})>(
+              future: () async {
+                final available = await authService.isBiometricAvailable;
+                final enabled = await authService.isBiometricEnabled;
+                return (available: available, enabled: enabled);
+              }(),
               builder: (context, snapshot) {
-                final available = snapshot.data ?? false;
+                final data = snapshot.data;
+                final available = data?.available ?? false;
+                final enabled = data?.enabled ?? false;
                 return SwitchListTile(
                   title: const Text('Biometric Lock'),
                   subtitle: Text(
@@ -465,7 +464,7 @@ class _SettingsScreenState extends ConsumerState<_SettingsScreen> {
                         ? 'Require fingerprint or face to unlock'
                         : 'No biometric hardware detected',
                   ),
-                  value: isBiometricEnabled && available,
+                  value: enabled && available,
                   onChanged: available
                       ? (value) => authNotifier.setBiometricEnabled(value)
                       : null,

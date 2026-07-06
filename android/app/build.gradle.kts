@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.jarvis.jarvis"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -20,8 +20,9 @@ android {
         applicationId = "com.jarvis.jarvis"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
-        targetSdk = 36
+        // minSdk = 37 restricts deployment to Android 17+ (Pixel 7 target).
+        minSdk = 37
+        targetSdk = 37
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
