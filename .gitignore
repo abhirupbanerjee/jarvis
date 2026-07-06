@@ -47,5 +47,10 @@ app.*.map.json
 # Environment secrets
 .env
 
+# Android build artifacts
+/android/app/build/
+/android/build/
+/android/.kotlin/
+
 # Drift generated files
 lib/data/database.g.dart
