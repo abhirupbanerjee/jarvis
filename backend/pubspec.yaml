@@ -1,0 +1,15 @@
+name: jarvis_backend
+description: J.A.R.V.I.S. ephemeral token server for Gemini Live API
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  shelf: ^1.4.0
+  shelf_router: ^1.1.0
+  googleai_dart: ^8.0.0
+
+dev_dependencies:
+  lints: ^6.0.0

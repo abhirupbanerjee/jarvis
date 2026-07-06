@@ -1,0 +1,70 @@
+name: jarvis
+description: "J.A.R.V.I.S. AI Assistant — Phase 1 Prototype"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ── Auth (Simple biometric app-lock) ──
+  local_auth: ^2.3.0                # Biometric (fingerprint/face)
+  flutter_secure_storage: ^9.2.0    # Persist biometric preference
+
+  # ── LLM ──
+  googleai_dart: ^8.0.0             # Gemini Live API + function calling
+
+  # ── Audio ──
+  record: ^6.1.0                    # Audio capture (mic → Gemini Live)
+  audioplayers: ^6.1.0              # TTS audio playback
+
+  # ── Android Widget ──
+  home_widget: ^0.9.3               # Home screen widget (tap to launch + listen)
+
+  # ── State Management ──
+  flutter_riverpod: ^2.6.0
+
+  # ── External Service ──
+  tavily_dart: ^0.2.4               # Tavily Search API client
+
+  # ── Native Android Tools ──
+  alarm: ^5.5.0                     # In-app alarm (plays audio, vibrates, shows notification)
+  flutter_local_notifications: ^18.0.0  # Timer notifications
+  device_info_plus: ^11.0.0         # Device info
+  battery_plus: ^6.0.0              # Battery level
+  flutter_system_action: ^1.0.4     # Flashlight toggle
+  vibration: ^2.0.0                 # Haptic feedback
+  permission_handler: ^11.3.0       # Runtime permissions
+
+  # ── Local Data (User Memory) ──
+  drift: ^2.22.0                    # Type-safe SQLite (user memory database)
+  sqlite3_flutter_libs: ^0.5.0      # SQLite binaries for Flutter
+  path_provider: ^2.1.0             # App documents directory for DB path
+
+  # ── Utilities ──
+  flutter_dotenv: ^5.2.0
+  intl: ^0.19.0
+  path: ^1.9.0
+
+  # ── Observability ──
+  logging: ^1.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  mockito: ^5.4.0
+  build_runner: ^2.4.0
+  riverpod_generator: ^2.6.0
+  drift_dev: ^2.22.0               # Drift code generator
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - .env
+    - .env.example
+    - assets/
