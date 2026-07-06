@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.jarvis.jarvis"
-    compileSdk = 37
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -20,9 +20,8 @@ android {
         applicationId = "com.jarvis.jarvis"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        // minSdk = 37 restricts deployment to Android 17+ (Pixel 7 target).
-        minSdk = 37
-        targetSdk = 37
+        minSdk = 24
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
@@ -32,6 +31,10 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Disable R8 minification — Flutter handles its own tree-shaking.
+            // AGP 9.0.1 has a known issue with proguard file paths.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
