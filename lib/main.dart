@@ -29,7 +29,11 @@ Future<void> main() async {
   });
 
   // Load environment configuration from .env
-  await dotenv.load();
+  try {
+    await dotenv.load();
+  } catch (e) {
+    debugPrint('⚠️ Failed to load .env: $e');
+  }
 
   // Initialize alarm service for in-app alarm tools
   await Alarm.init();
