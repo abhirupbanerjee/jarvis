@@ -266,6 +266,108 @@ TOKEN_SHARED_SECRET=your-shared-secret
 
 ---
 
+## Sideloading & Debugging
+
+This section covers building the APK, installing it onto a phone via USB, and monitoring logs in real time.
+
+### Prerequisites
+
+- **USB Debugging** enabled on the phone: *Settings → Developer Options → USB Debugging*
+- **adb (Android Debug Bridge)** installed on your computer (bundled with Android SDK or install via `apt install adb`)
+- USB cable connecting the phone to the computer
+
+### Verify Device Connection
+
+Confirm the phone is recognized over USB:
+
+```bash
+adb devices
+```
+
+Expected output (unauthorized means you need to accept the RSA prompt on the phone):
+
+```
+List of devices attached
+XXXXXXXXXXXX   device
+```
+
+If the device shows as `unauthorized`, unlock the phone and tap **"Allow USB debugging"** when prompted.
+
+---
+
+### Build & Install (Debug)
+
+Debug builds include hot-reload support and unminified code — ideal for development and log inspection:
+
+```bash
+# Build the debug APK
+flutter build apk --debug
+
+# Install onto the connected phone (overwrites existing install)
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
+```
+
+### Build & Install (Release)
+
+Release builds are optimized, minified, and signed (if a keystore is configured):
+
+```bash
+# Build the release APK
+flutter build apk --release
+
+# Install onto the connected phone
+adb install -r build/app/outputs/flutter-apk/app-release.apk
+```
+
+### Build for a Specific ABI (Smaller APK)
+
+If you only target Pixel 7 (arm64-v8a) and want a smaller APK:
+
+```bash
+flutter build apk --target-platform android-arm64
+
+# Or for multiple ABIs:
+flutter build apk --target-platform android-arm64,android-x64
+```
+
+---
+
+### Checking Logs on Computer (Wired Connection)
+
+Once the app is running on the phone, filter J.A.R.V.I.S. output in real time:
+
+```bash
+# All Flutter/Dart logs from the app
+adb logcat -s flutter
+
+# Filter for J.A.R.V.I.S.-specific log tags (Gemini Live, tools, audio)
+adb logcat | grep -E "jarvis|JARVIS|GeminiLive|AudioPipeline|ToolRegistry|ErrorHandler"
+
+# Clear the log buffer, then start watching (clean slate)
+adb logcat -c && adb logcat -s flutter
+
+# Include Dart observatory + verbose tags for audio/websocket debugging
+adb logcat -s flutter,chromium,AudioTrack,AudioRecord
+```
+
+**Useful logcat flags:**
+
+| Flag | Purpose |
+|---|---|
+| `-s flutter` | Show only Flutter/Dart `print()` and `log()` output |
+| `-c` | Clear (flush) the entire log buffer before watching |
+| `-v time` | Prefix each line with a timestamp |
+| `-v threadtime` | Timestamp + thread ID (default on most devices) |
+| `*:W` | Suppress everything below Warning level (less noise) |
+
+**Example — verbose audio + Gemini debugging session:**
+
+```bash
+adb logcat -c && adb logcat -v time -s flutter AudioTrack:* AudioRecord:* | grep -iE "gemini|audio|pcm|websocket|error|jarvis"
+```
+
+---
+
 ## Project Structure
 
 ```
