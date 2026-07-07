@@ -193,7 +193,11 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       // Wire up turn-complete stream — auto-commit when model finishes generating
       _turnCompleteSub = llmProvider.turnCompleteStream.listen((_) {
         _log.info('Turn complete — committing response');
-        _commitResponse();
+        final audioTriggered = _commitResponse();
+        if (!audioTriggered) {
+          state = state.copyWith(sessionState: ChatSessionState.listening);
+        }
+        // If audio was triggered, _playBufferedAudio() handles state transitions
       });
 
       // Connect to Gemini Live with all tools (AFTER setting up listeners)
@@ -225,7 +229,12 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   /// Stop listening but keep session alive.
   /// Commits any pending response before resetting.
   Future<void> stopListening() async {
-    if (state.sessionState != ChatSessionState.listening) return;
+    // Allow stopping from listening, thinking, or speaking states
+    if (state.sessionState != ChatSessionState.listening &&
+        state.sessionState != ChatSessionState.thinking &&
+        state.sessionState != ChatSessionState.speaking) {
+      return;
+    }
     _commitResponse();
     await _audioPipeline?.stopListening();
     // Remove stale "Listening..." system message when session ends
@@ -295,10 +304,13 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       // Commit current response as a message before starting new session
       _commitResponse();
       await startSession();
-    } else if (state.sessionState == ChatSessionState.listening) {
+    } else if (state.sessionState == ChatSessionState.listening ||
+               state.sessionState == ChatSessionState.thinking ||
+               state.sessionState == ChatSessionState.speaking) {
       _commitResponse();
       await stopListening();
     }
+    // connecting state: do nothing (let connection establish)
   }
 
   /// Execute a tool call from the LLM
@@ -369,7 +381,9 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     );
   }
 
-  void _commitResponse() {
+  /// Commits the current streaming response to message history.
+  /// Returns true if audio playback was triggered.
+  bool _commitResponse() {
     final hasText = state.currentResponse.isNotEmpty;
     final hasAudio = _audioBuffer.isNotEmpty;
 
@@ -394,7 +408,9 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // with audio-only (textAndAudio mode without transcription).
     if (hasAudio) {
       _playBufferedAudio();
+      return true;
     }
+    return false;
   }
 
   // ── Audio Playback ──
@@ -405,6 +421,9 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     if (_audioBuffer.isEmpty) return;
 
     _log.info('Playing TTS audio: ${_audioBuffer.length} raw PCM bytes');
+
+    // Signal that JARVIS is speaking
+    state = state.copyWith(sessionState: ChatSessionState.speaking);
 
     try {
       final wavBytes = _pcmToWav(
@@ -421,6 +440,11 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       _log.warning('Audio playback failed: $e');
     } finally {
       _audioBuffer.clear();
+      // Return to listening state after playback completes,
+      // unless interrupted (barge-in may have changed the state)
+      if (state.sessionState == ChatSessionState.speaking) {
+        state = state.copyWith(sessionState: ChatSessionState.listening);
+      }
     }
   }
 

@@ -32,6 +32,7 @@ class GeminiLiveProvider implements LlmProvider {
   static const _baseDelay = Duration(seconds: 1);
   static const _maxDelay = Duration(seconds: 30);
   int _retryCount = 0;
+  bool _isReconnecting = false;
   int _audioFramesSent = 0;
 
   // Cached session config for reconnection
@@ -177,8 +178,8 @@ class GeminiLiveProvider implements LlmProvider {
       _log.severe('Failed to connect to Gemini Live', e, stack);
       _emitConnectionState(ConnectionState.error);
 
-      // Attempt reconnection
-      if (_retryCount < _maxRetries) {
+      // Attempt reconnection (only if not already reconnecting)
+      if (_retryCount < _maxRetries && !_isReconnecting) {
         await _handleReconnect();
       }
     }
@@ -268,7 +269,7 @@ class GeminiLiveProvider implements LlmProvider {
   void _handleStreamDone() {
     _log.info('Stream closed');
     _emitConnectionState(ConnectionState.disconnected);
-    if (_retryCount < _maxRetries) {
+    if (_retryCount < _maxRetries && !_isReconnecting) {
       _handleReconnect();
     }
   }
@@ -276,17 +277,27 @@ class GeminiLiveProvider implements LlmProvider {
   // ── Reconnection ──
 
   Future<void> _handleReconnect() async {
+    if (_isReconnecting) {
+      _log.info('Reconnection already in progress, skipping');
+      return;
+    }
     if (_cachedSystemInstruction == null || _cachedTools == null) return;
-    final delay = _calculateBackoff(_retryCount);
-    _retryCount++;
-    _emitConnectionState(ConnectionState.connecting);
-    _log.info('Reconnecting in ${delay.inSeconds}s (attempt $_retryCount/$_maxRetries)');
-    await Future.delayed(delay);
-    await connect(
-      systemInstruction: _cachedSystemInstruction!,
-      tools: _cachedTools!,
-      config: _cachedConfig,
-    );
+
+    _isReconnecting = true;
+    try {
+      final delay = _calculateBackoff(_retryCount);
+      _retryCount++;
+      _emitConnectionState(ConnectionState.connecting);
+      _log.info('Reconnecting in ${delay.inSeconds}s (attempt $_retryCount/$_maxRetries)');
+      await Future.delayed(delay);
+      await connect(
+        systemInstruction: _cachedSystemInstruction!,
+        tools: _cachedTools!,
+        config: _cachedConfig,
+      );
+    } finally {
+      _isReconnecting = false;
+    }
   }
 
   Duration _calculateBackoff(int retry) {
@@ -299,10 +310,17 @@ class GeminiLiveProvider implements LlmProvider {
   @override
   void sendAudio(List<int> pcmBytes) {
     _audioFramesSent++;
+    if (_session == null) {
+      // Log periodically during reconnection gap, not every frame
+      if (_audioFramesSent % 50 == 1) {
+        _log.warning('sendAudio: $_audioFramesSent frames sent but session is null (reconnecting?)');
+      }
+      return;
+    }
     if (_audioFramesSent % 50 == 1) {
       _log.info('sendAudio: #$_audioFramesSent, ${pcmBytes.length}B, session=${_session != null}');
     }
-    _session?.sendAudio(pcmBytes);
+    _session!.sendAudio(pcmBytes);
   }
 
   @override
@@ -320,7 +338,11 @@ class GeminiLiveProvider implements LlmProvider {
 
   @override
   Future<void> sendToolResponse(List<FunctionResponse> responses) async {
-    if (_session == null) return;
+    if (_session == null) {
+      _log.warning('sendToolResponse called but session is null — '
+          '${responses.length} response(s) dropped');
+      return;
+    }
     _session!.sendToolResponse(responses.map((r) => gai.FunctionResponse(
       id: r.id,
       name: r.name,
