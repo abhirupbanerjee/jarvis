@@ -1,9 +1,10 @@
 // lib/ui/screens/memory_screen.dart — Memory Viewer & Management
 //
-// Browse, search, and delete stored user memories.
+// Browse and delete stored user memories.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 
 import '../../data/database.dart';
 import '../../providers/database_provider.dart';
@@ -16,6 +17,24 @@ class MemoryScreen extends ConsumerStatefulWidget {
 }
 
 class _MemoryScreenState extends ConsumerState<MemoryScreen> {
+  late Future<List<UserMemory>> _memoriesFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMemories();
+  }
+
+  void _loadMemories() {
+    final db = ref.read(databaseProvider);
+    _memoriesFuture = db.getAllMemories();
+  }
+
+  Future<void> _refreshMemories() async {
+    _loadMemories();
+    setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -36,7 +55,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
         elevation: 0,
       ),
       body: FutureBuilder<List<UserMemory>>(
-        future: db.getAllMemories(),
+        future: _memoriesFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
@@ -90,21 +109,27 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
             grouped.putIfAbsent(m.category, () => []).add(m);
           }
 
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: grouped.entries.map((entry) {
-              return _CategorySection(
-                category: entry.key,
-                memories: entry.value,
-                db: db,
-                onDeleted: () => setState(() {}),
-              );
-            }).toList(),
+          // UX-20: wrap list in RefreshIndicator for pull-to-refresh
+          return RefreshIndicator(
+            onRefresh: _refreshMemories,
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: grouped.entries.map((entry) {
+                return _CategorySection(
+                  category: entry.key,
+                  memories: entry.value,
+                  db: db,
+                  onDeleted: () {
+                    // BUG-10 fix: guard against setState on unmounted widget
+                    if (mounted) setState(() {});
+                  },
+                );
+              }).toList(),
+            ),
           );
         },
       ),
     );
-  }
 }
 
 class _CategorySection extends StatelessWidget {
@@ -146,7 +171,11 @@ class _CategorySection extends StatelessWidget {
             onPressed: () async {
               await db.deleteMemory(memory.category, memory.key);
               if (ctx.mounted) Navigator.pop(ctx);
-              onDeleted();
+              // BUG-10 fix: call onDeleted with a post-frame check
+              // to avoid setState on an unmounted parent widget.
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                onDeleted();
+              });
             },
             style: TextButton.styleFrom(
               foregroundColor: theme.colorScheme.error,
@@ -205,9 +234,19 @@ class _CategorySection extends StatelessWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                subtitle: Text(
-                  m.value,
-                  style: theme.textTheme.bodySmall,
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(m.value, style: theme.textTheme.bodySmall),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Created ${DateFormat.yMMMd().add_jm().format(m.createdAt)}',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant.withAlpha(120),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
                 ),
                 trailing: IconButton(
                   icon: Icon(

@@ -1,8 +1,8 @@
 # J.A.R.V.I.S.
 
-**AI Voice Assistant — Phase 1 Prototype**
+**AI Voice Assistant — Phase 1 Prototype (v1.0.0)**
 
-A Flutter-based voice assistant for Android that combines Gemini Live's real-time audio API with 13 native device tools and persistent user memory. Tap the mic, speak a command, and J.A.R.V.I.S. responds with voice and text — setting alarms, searching the web, controlling device hardware, and remembering facts about you across sessions.
+A Flutter-based voice assistant for Android that combines Gemini Live's real-time audio API with 13 native device tools and persistent user memory. Tap the mic, speak a command, type a message, or use the home screen widget — J.A.R.V.I.S. responds with voice and text, setting alarms, searching the web, controlling device hardware, and remembering facts about you across sessions.
 
 > **Target Device:** Google Pixel 7 — Android 17 (API 37)
 > **Detailed Plan:** See [plans/jarvis-phase1-plan.md](plans/jarvis-phase1-plan.md) for full architecture, implementation phases, risk register, and design decisions.
@@ -11,14 +11,23 @@ A Flutter-based voice assistant for Android that combines Gemini Live's real-tim
 
 ## Features
 
-### Voice Pipeline
-- **Tap-to-Talk** — tap the mic button (or home screen widget) to start a conversation
-- **Gemini Live WebSocket** — real-time bidirectional audio streaming at 16kHz PCM16 mono
+### Voice + Text Pipeline
+- **Tap-to-Talk** — tap the mic button (or home screen widget) to start a voice conversation
+- **Type-to-Chat** — send text prompts via keyboard; includes send button and long-press copy
+- **Gemini Live WebSocket** — real-time bidirectional audio streaming at 24kHz PCM16 mono
 - **Server-side VAD** — Gemini handles speech detection, barge-in, and turn-taking natively
 - **TTS Playback** — Gemini generates audio responses, played back via `audioplayers` with PCM→WAV conversion
+- **Typing Indicator** — animated dots shown while J.A.R.V.I.S. is thinking
+- **Pulsing Mic Animation** — subtle scale pulse on the mic button while listening
+- **Message Timestamps** — time labels shown on each chat bubble
+- **Scroll-to-Bottom FAB** — appears when scrolled up; tap to return to latest messages
+- **Error Banner** — inline error display with retry button when connection drops
 
 ### Authentication
-- **Biometric App-Lock** — fingerprint/face unlock via `local_auth`, with PIN fallback (default `0000`)
+- **Biometric App-Lock** — fingerprint/face unlock via `local_auth`, with PIN fallback (default `0000`); auto-prompts biometric on screen appear when enabled
+- **Changeable PIN** — custom PIN set via settings or lock screen dialog
+- **PIN Lockout** — countdown timer after too many failed attempts
+- **PIN Shake Animation** — horizontal shake on incorrect PIN entry
 - **Secure Storage** — credentials and PIN stored in Android Keystore via `flutter_secure_storage`
 - **No Server-Side Auth** — single-user prototype; all API credentials managed via `.env`
 
@@ -35,15 +44,22 @@ A Flutter-based voice assistant for Android that combines Gemini Live's real-tim
 - **Persistent across sessions** — facts, preferences, routines stored in Drift SQLite
 - **Auto-injected into system prompt** — Gemini knows your preferences on every session
 - **Structured categories** — preference, fact, schedule, contact, other
+- **Memory Viewer** — browse and delete memories in a dedicated screen with pull-to-refresh
+- **Creation Timestamps** — shows when each memory was stored
+
+### Settings & Management
+- **LLM Config Viewer** — read-only display of model, voice, temperature, and auth mode (configured in `.env`)
+- **Clear Chat History** — delete all conversation messages with confirmation dialog
+- **Biometric Toggle** — enable/disable biometric lock with loading indicator
 
 ### Android Home Screen Widget
 - Tap the widget to launch J.A.R.V.I.S. and start listening immediately
-- Native Kotlin widget via `home_widget` package
+- Shows session state (listening, thinking, speaking, idle) on the widget
 
 ### Error Handling
 - **Structured taxonomy** — network, auth, API, tool, audio, data categories
 - **Exponential backoff reconnection** — 1s→2s→4s→8s→16s→30s, max 5 retries
-- **User-friendly messages** — clear, non-technical error descriptions
+- **User-friendly messages** — clear, non-technical error descriptions displayed in chat
 
 ---
 
@@ -68,7 +84,7 @@ A Flutter-based voice assistant for Android that combines Gemini Live's real-tim
 | Layer | Technology | Purpose |
 |---|---|---|
 | **Framework** | Flutter 3.x / Dart 3.12+ | Cross-platform UI |
-| **LLM** | [googleai_dart](https://pub.dev/packages/googleai_dart) ^8.0.0 | Gemini Live WebSocket API (`gemini-2.5-flash-native-audio-latest`) |
+| **LLM** | [googleai_dart](https://pub.dev/packages/googleai_dart) ^9.0.0 | Gemini Live WebSocket API (`gemini-2.5-flash-native-audio-latest`) |
 | **State Management** | [flutter_riverpod](https://pub.dev/packages/flutter_riverpod) ^2.6.0 | Compile-time safe DI + state |
 | **Database** | [drift](https://pub.dev/packages/drift) ^2.22.0 | Type-safe SQLite for user memory |
 | **Search** | [tavily_dart](https://pub.dev/packages/tavily_dart) ^0.2.4 | Web search REST API |
@@ -143,11 +159,14 @@ flowchart TB
     end
 
     subgraph UI["UI Layer"]
-        MC[Main Chat<br>Mic Button + Status]
-        ST[Settings<br>Biometric + Memory]
+        AUTH_UI[Auth Screen<br>Biometric + PIN Lock]
+        MC[Home Screen<br>Chat + Mic + Send]
+        ST[Settings<br>Security + Config + Memory]
+        MEM_UI[Memory Screen<br>Browse + Delete]
     end
 
     APP -->|authenticated| MC
+    APP -->|locked| AUTH_UI
     ENV --> GEM
     REC -->|audio stream| GEM
     GEM -->|text + audio response| MC
@@ -158,6 +177,8 @@ flowchart TB
     BIO --> KS
     PIN --> KS
     GEM --> EH
+    MC -->|settings| ST
+    ST -->|view| MEM_UI
 ```
 
 ### Data Flow
@@ -375,9 +396,10 @@ JARVIS/
 ├── lib/
 │   ├── main.dart                          # App entry point, theme, auth gate
 │   ├── config/
+│   │   ├── app_config.dart                # App version constants
 │   │   └── llm_config.dart                # LLM config from .env (model, temp, voice, auth mode)
 │   ├── data/
-│   │   └── database.dart                  # Drift SQLite — UserMemories table
+│   │   └── database.dart                  # Drift SQLite — UserMemories + ChatMessages tables
 │   ├── providers/
 │   │   ├── auth_provider.dart             # Biometric + PIN auth state
 │   │   ├── chat_provider.dart             # Session orchestration, tool routing, audio playback
@@ -398,16 +420,20 @@ JARVIS/
 │   │   └── tavily_tool.dart               # Tavily web search
 │   └── ui/
 │       ├── screens/
-│       │   ├── auth_screen.dart           # Biometric prompt screen
-│       │   └── home_screen.dart           # Main chat UI + settings
-│       └── widgets/                       # Reusable UI widgets
+│       │   ├── auth_screen.dart           # Biometric + PIN lock screen
+│       │   ├── home_screen.dart           # Main chat UI (mic, send, bubbles, error banner, scroll FAB)
+│       │   ├── memory_screen.dart         # Memory viewer (browse, pull-to-refresh, delete)
+│       │   └── settings_screen.dart       # Security, LLM config, memory, chat, about
+│       └── widgets/
+│           └── change_pin_dialog.dart     # Shared PIN change dialog
 ├── backend/
 │   ├── pubspec.yaml                       # shelf + googleai_dart
 │   └── bin/
 │       └── server.dart                    # Ephemeral token server
-├── assets/                                # App assets (alarm sounds, etc.)
+├── assets/                                # App assets (icons, etc.)
 ├── plans/
-│   └── jarvis-phase1-plan.md              # Full architecture & implementation plan
+│   ├── jarvis-phase1-plan.md              # Full architecture & implementation plan
+│   └── jarvis-tier2-ux-plan.md            # UX improvements implementation plan
 ├── .env.example                           # Documented environment variable template
 ├── pubspec.yaml                           # Flutter dependencies
 └── README.md                              # This file

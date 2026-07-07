@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../config/app_config.dart';
 import '../../config/llm_config.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/config_provider.dart';
@@ -20,6 +21,31 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  // BUG-4 fix: cache futures to avoid recreating on every build.
+  // ConsumerState allows ref access in initState.
+  late Future<({bool available, bool enabled})> _biometricFuture;
+  late Future<bool> _hasCustomPinFuture;
+  bool _isTogglingBiometric = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final authService = ref.read(authServiceProvider);
+    _biometricFuture = () async {
+      final available = await authService.isBiometricAvailable;
+      final enabled = await authService.isBiometricEnabled;
+      return (available: available, enabled: enabled);
+    }();
+    _hasCustomPinFuture = authService.hasCustomPin;
+  }
+
+  Future<void> _refreshPinFuture() async {
+    final authService = ref.read(authServiceProvider);
+    setState(() {
+      _hasCustomPinFuture = authService.hasCustomPin;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -51,11 +77,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           Card(
             color: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
             child: FutureBuilder<({bool available, bool enabled})>(
-              future: () async {
-                final available = await authService.isBiometricAvailable;
-                final enabled = await authService.isBiometricEnabled;
-                return (available: available, enabled: enabled);
-              }(),
+              future: _biometricFuture,
               builder: (context, snapshot) {
                 final data = snapshot.data;
                 final available = data?.available ?? false;
@@ -68,8 +90,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         : 'No biometric hardware detected',
                   ),
                   value: enabled && available,
-                  onChanged: available
-                      ? (value) => authNotifier.setBiometricEnabled(value)
+                  onChanged: available && !_isTogglingBiometric
+                      ? (value) async {
+                          setState(() => _isTogglingBiometric = true);
+                          await authNotifier.setBiometricEnabled(value);
+                          if (mounted) {
+                            setState(() => _isTogglingBiometric = false);
+                          }
+                        }
+                      : null,
+                  secondary: _isTogglingBiometric
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
                       : null,
                   activeTrackColor: theme.colorScheme.primary.withAlpha(128),
                 );
@@ -80,7 +115,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           Card(
             color: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
             child: FutureBuilder<bool>(
-              future: authService.hasCustomPin,
+              future: _hasCustomPinFuture,
               builder: (context, snapshot) {
                 final hasCustom = snapshot.data ?? false;
                 return ListTile(
@@ -96,7 +131,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(content: Text('PIN changed successfully')),
                       );
-                      setState(() {});
+                      _refreshPinFuture();
                     }
                   },
                 );
@@ -115,22 +150,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ListTile(
                   leading: Icon(Icons.model_training, color: theme.colorScheme.primary),
                   title: const Text('Model'),
-                  subtitle: Text(llmConfig.modelId),
+                  subtitle: Text('${llmConfig.modelId} · configured in .env'),
                 ),
                 ListTile(
                   leading: Icon(Icons.record_voice_over, color: theme.colorScheme.primary),
                   title: const Text('Voice'),
-                  subtitle: Text(llmConfig.voice),
+                  subtitle: Text('${llmConfig.voice} · configured in .env'),
                 ),
                 ListTile(
                   leading: Icon(Icons.thermostat, color: theme.colorScheme.primary),
                   title: const Text('Temperature'),
-                  subtitle: Text(llmConfig.temperature.toString()),
+                  subtitle: Text('${llmConfig.temperature} · configured in .env'),
                 ),
                 ListTile(
                   leading: Icon(Icons.vpn_key, color: theme.colorScheme.primary),
                   title: const Text('Auth Mode'),
-                  subtitle: Text(llmConfig.useEphemeralTokens ? 'Ephemeral token' : 'API key'),
+                  subtitle: Text(
+                    '${llmConfig.useEphemeralTokens ? 'Ephemeral token' : 'API key'} · configured in .env',
+                  ),
                 ),
               ],
             ),
@@ -157,20 +194,38 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     );
                   },
                 ),
-                ListTile(
-                  leading: Icon(Icons.analytics_outlined, color: theme.colorScheme.primary),
-                  title: const Text('Memory Count'),
-                  trailing: FutureBuilder<int>(
-                    future: db.memoryCount,
-                    builder: (context, snapshot) {
-                      return Text(
+                FutureBuilder<int>(
+                  future: db.memoryCount,
+                  builder: (context, snapshot) {
+                    return ListTile(
+                      leading: Icon(Icons.analytics_outlined, color: theme.colorScheme.primary),
+                      title: const Text('Memory Count'),
+                      trailing: Text(
                         '${snapshot.data ?? 0}',
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
-                      );
-                    },
-                  ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // ── CHAT ──
+          _SectionHeader(title: 'CHAT', theme: theme),
+          const SizedBox(height: 8),
+          Card(
+            color: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: Icon(Icons.delete_sweep, color: theme.colorScheme.error),
+                  title: const Text('Clear Chat History'),
+                  subtitle: const Text('Remove all conversation messages'),
+                  onTap: () => _confirmClearHistory(context),
                 ),
               ],
             ),
@@ -186,11 +241,47 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               children: [
                 ListTile(
                   leading: Icon(Icons.info_outline),
-                  title: Text('J.A.R.V.I.S. Phase 1'),
-                  subtitle: Text('Prototype — Pixel 7 / Android 16+'),
+                  title: Text('J.A.R.V.I.S. ${AppConfig.versionLabel}'),
+                  subtitle: const Text('Prototype — Pixel 7 / Android 16+'),
                 ),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmClearHistory(BuildContext context) {
+    final theme = Theme.of(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear Chat History'),
+        content: const Text(
+          'This will permanently delete all conversation messages. '
+          'Memories will not be affected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () async {
+              final db = ref.read(databaseProvider);
+              await db.clearHistory();
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Chat history cleared')),
+                );
+              }
+            },
+            style: TextButton.styleFrom(
+              foregroundColor: theme.colorScheme.error,
+            ),
+            child: const Text('Clear'),
           ),
         ],
       ),

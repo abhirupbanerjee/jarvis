@@ -1,8 +1,8 @@
 // lib/ui/screens/auth_screen.dart — Dual Biometric + PIN Authentication Screen
 //
-// Shows both a biometric unlock button (if hardware available) and a 4-digit
-// PIN entry. User chooses their preferred method. PIN defaults to "0000"
-// and can be changed via dialog.
+// Shows both a biometric unlock button (if hardware available and user enabled)
+// and a 4-digit PIN entry. User chooses their preferred method. PIN defaults
+// to "0000" and can be changed via dialog (post-auth only — moved to settings).
 
 import 'dart:async';
 
@@ -12,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
 
 import '../../providers/auth_provider.dart';
+import '../widgets/change_pin_dialog.dart';
 
 class AuthScreen extends ConsumerStatefulWidget {
   const AuthScreen({super.key});
@@ -20,28 +21,51 @@ class AuthScreen extends ConsumerStatefulWidget {
   ConsumerState<AuthScreen> createState() => _AuthScreenState();
 }
 
-class _AuthScreenState extends ConsumerState<AuthScreen> {
+class _AuthScreenState extends ConsumerState<AuthScreen>
+    with SingleTickerProviderStateMixin {
   final _pinController = TextEditingController();
   final _pinFocusNode = FocusNode();
   final _pinDigits = List.filled(4, '');
+  int _previousPinLength = 0;
 
   bool _isBiometricAvailable = false;
+  bool _isBiometricEnabled = false;
   List<BiometricType> _biometricTypes = [];
   bool _isAuthenticating = false;
   String? _errorMessage;
   bool _pinLockedOut = false;
   Timer? _lockoutTimer;
   Duration _lockoutRemaining = Duration.zero;
+  bool _autoPrompted = false;
+
+  // UX-22: PIN dot shake animation
+  late final AnimationController _shakeController;
+  late final Animation<double> _shakeAnim;
 
   @override
   void initState() {
     super.initState();
+    _shakeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 400),
+    );
+    _shakeAnim = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween<double>(begin: 0, end: -8), weight: 1),
+      TweenSequenceItem(tween: Tween<double>(begin: -8, end: 8), weight: 2),
+      TweenSequenceItem(tween: Tween<double>(begin: 8, end: -4), weight: 2),
+      TweenSequenceItem(tween: Tween<double>(begin: -4, end: 4), weight: 2),
+      TweenSequenceItem(tween: Tween<double>(begin: 4, end: 0), weight: 1),
+    ]).animate(CurvedAnimation(
+      parent: _shakeController,
+      curve: Curves.easeInOut,
+    ));
     _checkBiometricAvailability();
     _pinController.addListener(_onPinChanged);
   }
 
   @override
   void dispose() {
+    _shakeController.dispose();
     _pinController.removeListener(_onPinChanged);
     _pinController.dispose();
     _pinFocusNode.dispose();
@@ -50,21 +74,43 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   }
 
   Future<void> _checkBiometricAvailability() async {
+    final authService = ref.read(authServiceProvider);
     final authNotifier = ref.read(authStateProvider.notifier);
+
     final available = await authNotifier.isBiometricOptionAvailable;
     if (!mounted) return;
 
-    final authService = ref.read(authServiceProvider);
+    final enabled = await authService.isBiometricEnabled;
     final types = await authService.getAvailableBiometrics();
 
     setState(() {
       _isBiometricAvailable = available;
+      _isBiometricEnabled = enabled;
       _biometricTypes = types;
     });
+
+    // UX-21: Auto-prompt biometric on screen appear if available and enabled
+    if (_isBiometricAvailable && _isBiometricEnabled && !_autoPrompted) {
+      _autoPrompted = true;
+      // Short delay so the UI renders before system biometric dialog
+      Future.delayed(const Duration(milliseconds: 400), () {
+        if (mounted && !_isAuthenticating && _pinController.text.isEmpty) {
+          _attemptBiometric();
+        }
+      });
+    }
   }
 
   void _onPinChanged() {
     final text = _pinController.text;
+    final newLength = text.length;
+
+    // UX-24: haptic feedback on each digit entry
+    if (newLength > _previousPinLength && newLength <= 4) {
+      HapticFeedback.selectionClick();
+    }
+    _previousPinLength = newLength;
+
     setState(() {
       for (var i = 0; i < 4; i++) {
         _pinDigits[i] = i < text.length ? '•' : '';
@@ -94,14 +140,16 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
         break;
       case PinFailure(:final remainingAttempts):
         _pinController.clear();
+        _previousPinLength = 0;
         setState(() {
           _isAuthenticating = false;
           _errorMessage = 'Incorrect PIN — $remainingAttempts attempts remaining';
         });
-        // Shake animation trigger
+        _shakeController.forward(from: 0); // UX-22: shake on wrong PIN
         _pinFocusNode.requestFocus();
       case PinLockedOut(:final remaining):
         _pinController.clear();
+        _previousPinLength = 0;
         setState(() {
           _isAuthenticating = false;
           _pinLockedOut = true;
@@ -151,113 +199,6 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
         _isAuthenticating = false;
         _errorMessage = 'Biometric authentication failed. Try again or use PIN.';
       });
-    }
-  }
-
-  Future<void> _showChangePinDialog() async {
-    final authService = ref.read(authServiceProvider);
-
-    final oldPinController = TextEditingController();
-    final newPinController = TextEditingController();
-    final confirmPinController = TextEditingController();
-    final formKey = GlobalKey<FormState>();
-
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Change PIN'),
-        content: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: oldPinController,
-                decoration: const InputDecoration(
-                  labelText: 'Current PIN',
-                  hintText: 'Enter current 4-digit PIN',
-                ),
-                keyboardType: TextInputType.number,
-                maxLength: 4,
-                obscureText: true,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                ],
-                validator: (v) {
-                  if (v == null || v.length != 4) return 'Enter 4 digits';
-                  return null;
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: newPinController,
-                decoration: const InputDecoration(
-                  labelText: 'New PIN',
-                  hintText: 'Enter new 4-digit PIN',
-                ),
-                keyboardType: TextInputType.number,
-                maxLength: 4,
-                obscureText: true,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                ],
-                validator: (v) {
-                  if (v == null || v.length != 4) return 'Enter 4 digits';
-                  return null;
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: confirmPinController,
-                decoration: const InputDecoration(
-                  labelText: 'Confirm New PIN',
-                  hintText: 'Re-enter new PIN',
-                ),
-                keyboardType: TextInputType.number,
-                maxLength: 4,
-                obscureText: true,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                ],
-                validator: (v) {
-                  if (v != newPinController.text) return 'PINs do not match';
-                  return null;
-                },
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              if (!formKey.currentState!.validate()) return;
-
-              final oldPinValid = await authService.verifyPin(oldPinController.text);
-              if (!oldPinValid && ctx.mounted) {
-                ScaffoldMessenger.of(ctx).showSnackBar(
-                  const SnackBar(content: Text('Current PIN is incorrect')),
-                );
-                return;
-              }
-
-              await authService.setPin(newPinController.text);
-              if (ctx.mounted) Navigator.pop(ctx, true);
-            },
-            child: const Text('Change PIN'),
-          ),
-        ],
-      ),
-    );
-
-    if (result == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('PIN changed successfully')),
-      );
     }
   }
 
@@ -354,46 +295,53 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                   ),
                 ),
 
-                // Visual PIN dots
-                GestureDetector(
-                  onTap: () {
-                    if (!_pinLockedOut) _pinFocusNode.requestFocus();
-                  },
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: List.generate(4, (i) {
-                      final filled = _pinDigits[i].isNotEmpty;
-                      return AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        width: 48,
-                        height: 48,
-                        margin: const EdgeInsets.symmetric(horizontal: 6),
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: filled
-                                ? theme.colorScheme.primary
-                                : theme.colorScheme.outlineVariant,
-                            width: 1.5,
-                          ),
-                          color: filled
-                              ? theme.colorScheme.primary.withAlpha(30)
-                              : Colors.transparent,
-                        ),
-                        child: Center(
-                          child: Container(
-                            width: 12,
-                            height: 12,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
+                // Visual PIN dots (UX-22: wrapped with shake animation)
+                AnimatedBuilder(
+                  animation: _shakeAnim,
+                  builder: (context, child) => Transform.translate(
+                    offset: Offset(_shakeAnim.value, 0),
+                    child: child,
+                  ),
+                  child: GestureDetector(
+                    onTap: () {
+                      if (!_pinLockedOut) _pinFocusNode.requestFocus();
+                    },
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(4, (i) {
+                        final filled = _pinDigits[i].isNotEmpty;
+                        return AnimatedContainer(
+                          duration: const Duration(milliseconds: 150),
+                          width: 48,
+                          height: 48,
+                          margin: const EdgeInsets.symmetric(horizontal: 6),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
                               color: filled
                                   ? theme.colorScheme.primary
-                                  : Colors.transparent,
+                                  : theme.colorScheme.outlineVariant,
+                              width: 1.5,
+                            ),
+                            color: filled
+                                ? theme.colorScheme.primary.withAlpha(30)
+                                : Colors.transparent,
+                          ),
+                          child: Center(
+                            child: Container(
+                              width: 12,
+                              height: 12,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: filled
+                                    ? theme.colorScheme.primary
+                                    : Colors.transparent,
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                    }),
+                        );
+                      }),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -416,7 +364,8 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                 const SizedBox(height: 8),
 
                 // ── Divider with "OR" ──
-                if (_isBiometricAvailable) ...[
+                // BUG-9 fix: check both hardware availability AND user preference
+                if (_isBiometricAvailable && _isBiometricEnabled) ...[
                   Row(
                     children: [
                       Expanded(
@@ -484,24 +433,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                     ),
                   ),
                 ],
-
-                const SizedBox(height: 32),
-
-                // ── Change PIN ──
-                TextButton.icon(
-                  onPressed: _showChangePinDialog,
-                  icon: Icon(
-                    Icons.lock_reset,
-                    size: 16,
-                    color: theme.colorScheme.onSurfaceVariant.withAlpha(160),
-                  ),
-                  label: Text(
-                    'Change PIN',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant.withAlpha(160),
-                    ),
-                  ),
-                ),
+                // UX-25: Change PIN removed from lock screen (available in settings post-auth)
               ],
             ),
           ),
