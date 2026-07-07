@@ -18,6 +18,14 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _scrollController = ScrollController();
+  final _textController = TextEditingController();
+
+  @override
+  void dispose() {
+    _textController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -74,10 +82,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
           ),
 
-          // Bottom mic bar
-          _MicBar(
+          // Bottom input bar (text field + mic button)
+          _InputBar(
             state: chatData.sessionState,
-            onTap: chat.toggleListening,
+            onMicTap: chat.toggleListening,
+            textController: _textController,
+            onSendText: (text) {
+              ref.read(chatProvider.notifier).sendTextPrompt(text);
+            },
           ),
         ],
       ),
@@ -330,22 +342,28 @@ class _ChatBubble extends StatelessWidget {
   }
 }
 
-// ── Mic Button Bar ──
+// ── Input Bar (text field + mic button) ──
 
-class _MicBar extends StatelessWidget {
+class _InputBar extends StatelessWidget {
   final ChatSessionState state;
-  final VoidCallback onTap;
+  final VoidCallback onMicTap;
+  final TextEditingController textController;
+  final Function(String) onSendText;
 
-  const _MicBar({required this.state, required this.onTap});
+  const _InputBar({
+    required this.state,
+    required this.onMicTap,
+    required this.textController,
+    required this.onSendText,
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isActive = state == ChatSessionState.listening;
     final isConnecting = state == ChatSessionState.connecting;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: theme.colorScheme.surface,
         border: Border(
@@ -355,49 +373,95 @@ class _MicBar extends StatelessWidget {
         ),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          GestureDetector(
-            onTap: isConnecting ? null : onTap,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              width: 64,
-              height: 64,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isActive
-                    ? theme.colorScheme.error
-                    : theme.colorScheme.primary,
-                boxShadow: [
-                  BoxShadow(
-                    color: (isActive
-                            ? theme.colorScheme.error
-                            : theme.colorScheme.primary)
-                        .withAlpha(60),
-                    blurRadius: isActive ? 16 : 8,
-                    spreadRadius: isActive ? 4 : 1,
-                  ),
-                ],
+          // Text input field
+          Expanded(
+            child: TextField(
+              controller: textController,
+              style: theme.textTheme.bodyMedium,
+              decoration: InputDecoration(
+                hintText: 'Type a message...',
+                hintStyle: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant.withAlpha(100),
+                ),
+                filled: true,
+                fillColor: theme.colorScheme.surfaceContainerHighest.withAlpha(60),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  borderSide: BorderSide.none,
+                ),
               ),
-              child: isConnecting
-                  ? const Center(
-                      child: SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      ),
-                    )
-                  : Icon(
-                      isActive ? Icons.stop : Icons.mic,
-                      color: Colors.white,
-                      size: 28,
-                    ),
+              onSubmitted: (text) {
+                final trimmed = text.trim();
+                if (trimmed.isNotEmpty) {
+                  onSendText(trimmed);
+                  textController.clear();
+                }
+              },
             ),
           ),
+          const SizedBox(width: 8),
+          // Mic button
+          _MicButton(state: state, onTap: onMicTap, isConnecting: isConnecting),
         ],
+      ),
+    );
+  }
+}
+
+// ── Mic Button ──
+
+class _MicButton extends StatelessWidget {
+  final ChatSessionState state;
+  final VoidCallback onTap;
+  final bool isConnecting;
+
+  const _MicButton({
+    required this.state,
+    required this.onTap,
+    required this.isConnecting,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isActive = state == ChatSessionState.listening;
+
+    return GestureDetector(
+      onTap: isConnecting ? null : onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: isActive ? theme.colorScheme.error : theme.colorScheme.primary,
+          boxShadow: [
+            BoxShadow(
+              color: (isActive ? theme.colorScheme.error : theme.colorScheme.primary)
+                  .withAlpha(60),
+              blurRadius: isActive ? 12 : 6,
+              spreadRadius: isActive ? 3 : 1,
+            ),
+          ],
+        ),
+        child: isConnecting
+            ? const Center(
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                ),
+              )
+            : Icon(
+                isActive ? Icons.stop : Icons.mic,
+                color: Colors.white,
+                size: 22,
+              ),
       ),
     );
   }

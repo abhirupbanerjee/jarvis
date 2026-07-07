@@ -225,6 +225,11 @@ class GeminiLiveProvider implements LlmProvider {
           for (final part in modelTurn.parts) {
             _log.info('  Part: ${part.runtimeType}');
             if (part is gai.TextPart && part.text.isNotEmpty) {
+              // Skip model thinking/reasoning — only stream final response text
+              if (part.thought == true) {
+                _log.fine('Skipping thought: "${part.text.length > 50 ? '${part.text.substring(0, 50)}...' : part.text}"');
+                continue;
+              }
               _log.info('Gemini text: "${part.text.length > 80 ? '${part.text.substring(0, 80)}...' : part.text}"');
               _textStreamController.add(part.text);
             }
@@ -302,7 +307,15 @@ class GeminiLiveProvider implements LlmProvider {
 
   @override
   void sendText(String text) {
-    _session?.sendText(text);
+    if (_session == null) {
+      _log.warning('sendText called but session is null — text not sent');
+      return;
+    }
+    try {
+      _session!.sendText(text);
+    } catch (e, stack) {
+      _log.severe('Failed to send text via WebSocket', e, stack);
+    }
   }
 
   @override

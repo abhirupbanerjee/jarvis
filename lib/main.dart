@@ -4,6 +4,7 @@ import 'package:alarm/alarm.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:home_widget/home_widget.dart';
 import 'package:logging/logging.dart';
 
 import 'providers/auth_provider.dart';
@@ -37,6 +38,9 @@ Future<void> main() async {
 
   // Initialize alarm service for in-app alarm tools
   await Alarm.init();
+
+  // Register home screen widget group
+  HomeWidget.setAppGroupId('com.jarvis.jarvis');
 
   runApp(
     const ProviderScope(

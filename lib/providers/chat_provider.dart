@@ -205,9 +205,6 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         tools: toolDeclarations,
       );
 
-      // DEBUG: Send text query to verify pipeline works (mirrors integration test)
-      llmProvider.sendText('Hello');
-
       // Setup audio pipeline
       _audioPipeline = AudioPipeline(llmProvider: llmProvider);
 
@@ -266,6 +263,29 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       messages: cleanedMessages,
     );
     _log.info('Chat session ended');
+  }
+
+  /// Send a text prompt and add it to chat history as a user message.
+  /// The model's response streams in via the existing _textSub listener
+  /// and is committed on turnComplete via _commitResponse().
+  Future<void> sendTextPrompt(String text) async {
+    // Add user message to chat history
+    state = state.copyWith(
+      messages: [
+        ...state.messages,
+        ChatMessage(
+          text: text,
+          isUser: true,
+          timestamp: DateTime.now(),
+        ),
+      ],
+      sessionState: ChatSessionState.thinking,
+      currentResponse: '',
+    );
+
+    // Send to LLM
+    final llmProvider = _ref.read(llmProviderProvider);
+    llmProvider.sendText(text);
   }
 
   /// Toggle listening — tap mic to start/stop

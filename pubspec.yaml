@@ -15,7 +15,7 @@ dependencies:
   flutter_secure_storage: ^9.2.0    # Persist biometric preference
 
   # ── LLM ──
-  googleai_dart: ^8.0.0             # Gemini Live API + function calling
+  googleai_dart: ^9.0.0             # Gemini Live API + function calling (v9 needed for TextPart.thought)
 
   # ── Audio ──
   record: ^6.1.0                    # Audio capture (mic → Gemini Live)
