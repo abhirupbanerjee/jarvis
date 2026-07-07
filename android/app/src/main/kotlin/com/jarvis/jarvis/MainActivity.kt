@@ -26,6 +26,23 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGUMENT", "packageName is required", null)
                     }
                 }
+                "resolveApp" -> {
+                    val appName = (call.argument<String>("appName") ?: "").lowercase()
+                    val pm = packageManager
+                    val intent = Intent(Intent.ACTION_MAIN).apply {
+                        addCategory(Intent.CATEGORY_LAUNCHER)
+                    }
+                    val activities = pm.queryIntentActivities(intent, 0)
+                    var found: String? = null
+                    for (ri in activities) {
+                        val label = ri.loadLabel(pm).toString().lowercase()
+                        if (label.contains(appName)) {
+                            found = ri.activityInfo.packageName
+                            break
+                        }
+                    }
+                    result.success(found)
+                }
                 else -> result.notImplemented()
             }
         }

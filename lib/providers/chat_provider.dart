@@ -5,8 +5,10 @@ import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:home_widget/home_widget.dart';
 import 'package:logging/logging.dart';
 
+import '../data/database.dart';
 import '../providers/database_provider.dart';
 import '../providers/llm_provider.dart';
 import '../providers/llm_provider_provider.dart';
@@ -209,6 +211,20 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         tools: toolDeclarations,
       );
 
+      // Load chat history from database
+      final db = _ref.read(databaseProvider);
+      final history = await db.loadRecentMessages();
+      if (history.isNotEmpty) {
+        final loadedMessages = history.map((m) => ChatMessage(
+          text: m.text,
+          isUser: m.isUser,
+          isSystem: m.isSystem,
+          timestamp: m.timestamp,
+        )).toList();
+        state = state.copyWith(messages: loadedMessages);
+        _log.info('Loaded ${loadedMessages.length} messages from history');
+      }
+
       // Setup audio pipeline
       _audioPipeline = AudioPipeline(llmProvider: llmProvider);
 
@@ -216,6 +232,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       state = state.copyWith(sessionState: ChatSessionState.listening);
 
       _addSystemMessage('Listening...');
+      _pushWidgetState('listening');
       _log.info('Chat session started');
     } catch (e, stack) {
       _log.severe('Failed to start session', e, stack);
@@ -246,6 +263,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       toolStatus: '',
       messages: cleanedMessages,
     );
+    _pushWidgetState('idle');
   }
 
   /// End the chat session completely
@@ -271,6 +289,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       toolStatus: '',
       messages: cleanedMessages,
     );
+    _pushWidgetState('idle');
     _log.info('Chat session ended');
   }
 
@@ -279,18 +298,22 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   /// and is committed on turnComplete via _commitResponse().
   Future<void> sendTextPrompt(String text) async {
     // Add user message to chat history
+    final message = ChatMessage(
+      text: text,
+      isUser: true,
+      timestamp: DateTime.now(),
+    );
     state = state.copyWith(
       messages: [
         ...state.messages,
-        ChatMessage(
-          text: text,
-          isUser: true,
-          timestamp: DateTime.now(),
-        ),
+        message,
       ],
       sessionState: ChatSessionState.thinking,
       currentResponse: '',
     );
+
+    // Persist user message (fire-and-forget)
+    _persistMessage(message);
 
     // Send to LLM
     final llmProvider = _ref.read(llmProviderProvider);
@@ -391,17 +414,21 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         'textLen=${state.currentResponse.length} audioLen=${_audioBuffer.length}');
 
     if (hasText) {
+      final message = ChatMessage(
+        text: state.currentResponse.trim(),
+        isUser: false,
+        timestamp: DateTime.now(),
+      );
       state = state.copyWith(
         messages: [
           ...state.messages,
-          ChatMessage(
-            text: state.currentResponse.trim(),
-            isUser: false,
-            timestamp: DateTime.now(),
-          ),
+          message,
         ],
         currentResponse: '',
       );
+
+      // Persist to database (fire-and-forget)
+      _persistMessage(message);
     }
 
     // Play audio regardless of whether text arrived — Gemini may respond
@@ -424,6 +451,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
 
     // Signal that JARVIS is speaking
     state = state.copyWith(sessionState: ChatSessionState.speaking);
+    _pushWidgetState('speaking');
 
     try {
       final wavBytes = _pcmToWav(
@@ -444,6 +472,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       // unless interrupted (barge-in may have changed the state)
       if (state.sessionState == ChatSessionState.speaking) {
         state = state.copyWith(sessionState: ChatSessionState.listening);
+        _pushWidgetState('listening');
       }
     }
   }
@@ -501,6 +530,31 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       ...header.buffer.asUint8List(),
       ...pcmData,
     ]);
+  }
+
+  /// Persist a chat message to the database (fire-and-forget).
+  void _persistMessage(ChatMessage message) {
+    try {
+      final db = _ref.read(databaseProvider);
+      db.saveMessage(
+        text: message.text,
+        isUser: message.isUser,
+        isSystem: message.isSystem,
+        timestamp: message.timestamp,
+      );
+    } catch (e) {
+      _log.warning('Failed to persist message: $e');
+    }
+  }
+
+  /// Push session state to the home screen widget.
+  void _pushWidgetState(String status) {
+    try {
+      HomeWidget.saveWidgetData('widget_status', status);
+      HomeWidget.updateWidget(androidName: 'JarvisWidgetProvider');
+    } catch (_) {
+      // Widget update is best-effort; don't crash if it fails
+    }
   }
 
   @override

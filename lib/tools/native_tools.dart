@@ -9,11 +9,18 @@ import 'package:alarm/alarm.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_system_action/flutter_system_action.dart';
 import 'package:intl/intl.dart';
 import 'package:vibration/vibration.dart';
 
 import 'tool_registry.dart';
+
+// ── Module-level state ──
+
+/// Tracks flashlight state for toggle operations.
+/// Resets on app restart (acceptable for Phase 1).
+bool _flashlightOn = false;
 
 // ── P0: Time & Scheduling ──
 
@@ -145,14 +152,50 @@ final setTimerTool = ToolDefinition(
     final durationSeconds = args['duration_seconds'] as int;
     final label = args['label'] as String? ?? 'Timer';
 
-    // TODO: Integrate with Timer + flutter_local_notifications
+    // Validate duration
+    if (durationSeconds <= 0) {
+      return {'success': false, 'error': 'Duration must be positive'};
+    }
+    if (durationSeconds > 86400) {
+      return {'success': false, 'error': 'Duration max 24 hours (86400 seconds)'};
+    }
 
-    return {
-      'success': true,
-      'message': 'Timer started for $durationSeconds seconds',
-      'duration_seconds': durationSeconds,
-      'label': label,
-    };
+    final timerId = DateTime.now().millisecondsSinceEpoch;
+
+    try {
+      final scheduledTime = DateTime.now().add(Duration(seconds: durationSeconds));
+      await FlutterLocalNotificationsPlugin().zonedSchedule(
+        timerId,
+        'J.A.R.V.I.S. Timer',
+        label,
+        scheduledTime,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'jarvis_timer_channel',
+            'Timers',
+            channelDescription: 'J.A.R.V.I.S. timer notifications',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+
+      return {
+        'success': true,
+        'message': 'Timer set for $durationSeconds seconds',
+        'timer_id': timerId,
+        'duration_seconds': durationSeconds,
+        'label': label,
+        'scheduled_time_iso': scheduledTime.toIso8601String(),
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': 'Failed to set timer: $e',
+      };
+    }
   },
 );
 
@@ -193,7 +236,7 @@ final cancelAlarmTool = ToolDefinition(
 /// Toggle device flashlight on/off
 final toggleFlashlightTool = ToolDefinition(
   name: 'toggle_flashlight',
-  description: 'Turn the device flashlight (torch) on or off.',
+  description: 'Turn the device flashlight (torch) on, off, or toggle.',
   parameters: {
     'type': 'object',
     'properties': {
@@ -210,13 +253,21 @@ final toggleFlashlightTool = ToolDefinition(
     try {
       if (state == 'on') {
         await FlutterSystemAction().torchButtonOnEvent();
+        _flashlightOn = true;
       } else if (state == 'off') {
         await FlutterSystemAction().torchButtonOffEvent();
+        _flashlightOn = false;
       } else {
-        // toggle — turn on (no state tracking in Phase 1)
-        await FlutterSystemAction().torchButtonOnEvent();
+        // toggle: use tracked state
+        if (_flashlightOn) {
+          await FlutterSystemAction().torchButtonOffEvent();
+          _flashlightOn = false;
+        } else {
+          await FlutterSystemAction().torchButtonOnEvent();
+          _flashlightOn = true;
+        }
       }
-      return {'success': true, 'flashlight': state};
+      return {'success': true, 'flashlight': _flashlightOn ? 'on' : 'off'};
     } catch (e) {
       return {'success': false, 'error': e.toString()};
     }
@@ -347,18 +398,33 @@ final openAppTool = ToolDefinition(
     };
 
     final name = (args['app_name'] as String).toLowerCase();
-    final packageName = appPackageMap[name];
 
+    // Tier 1: hardcoded lookup
+    var packageName = appPackageMap[name];
+
+    // Tier 2: dynamic PackageManager lookup
     if (packageName == null) {
+      try {
+        const channel = MethodChannel('com.jarvis.jarvis/app_launcher');
+        packageName = await channel.invokeMethod<String>(
+          'resolveApp',
+          {'appName': args['app_name']},
+        );
+      } catch (_) {
+        // Dynamic resolution failed — report as unknown below
+      }
+    }
+
+    if (packageName == null || packageName.isEmpty) {
       return {
         'success': false,
         'error': 'Unknown app: ${args['app_name']}. '
-            'Supported apps: ${appPackageMap.keys.join(", ")}',
+            'Supported apps: ${appPackageMap.keys.join(", ")}, '
+            'or try another app name.',
       };
     }
 
     try {
-      // Use platform channel to launch the app via PackageManager
       const channel = MethodChannel('com.jarvis.jarvis/app_launcher');
       final launched = await channel.invokeMethod<bool>(
         'launchApp',

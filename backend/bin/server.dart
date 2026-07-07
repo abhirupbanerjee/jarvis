@@ -86,6 +86,40 @@ Future<Response> _handleTokenRequest(Request request) async {
   }
 }
 
+// ── Rate Limiting ──
+
+final _requestCounts = <String, List<DateTime>>{};
+const _rateLimitWindow = Duration(minutes: 1);
+const _maxRequestsPerWindow = 10;
+
+Middleware _rateLimitMiddleware() {
+  return (Handler handler) {
+    return (Request request) async {
+      final clientIp = request.headers['x-forwarded-for'] ??
+          (request.url.host.isNotEmpty ? request.url.host : 'unknown');
+
+      final now = DateTime.now();
+      final windowStart = now.subtract(_rateLimitWindow);
+
+      _requestCounts.putIfAbsent(clientIp, () => []);
+      _requestCounts[clientIp] = _requestCounts[clientIp]!
+          .where((t) => t.isAfter(windowStart))
+          .toList();
+
+      if (_requestCounts[clientIp]!.length >= _maxRequestsPerWindow) {
+        return Response(
+          429,
+          body: 'Rate limit exceeded. Try again later.',
+          headers: {'Retry-After': '60'},
+        );
+      }
+
+      _requestCounts[clientIp]!.add(now);
+      return handler(request);
+    };
+  };
+}
+
 // ── Middleware ──
 
 Middleware _corsMiddleware() {
@@ -116,6 +150,7 @@ void main() async {
 
   final handler = Pipeline()
       .addMiddleware(logRequests())
+      .addMiddleware(_rateLimitMiddleware())
       .addMiddleware(_corsMiddleware())
       .addHandler(_router.call);
 

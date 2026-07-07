@@ -24,8 +24,17 @@ class UserMemories extends Table {
   List<Set<Column>> get uniqueKeys => [{category, key}];
 }
 
-/// Drift database for user memories
-@DriftDatabase(tables: [UserMemories])
+/// Chat message history table
+class ChatMessages extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get text => text()();
+  BoolColumn get isUser => boolean()();
+  BoolColumn get isSystem => boolean()();
+  DateTimeColumn get timestamp => dateTime().withDefault(currentDateAndTime)();
+}
+
+/// Drift database for user memories and chat history
+@DriftDatabase(tables: [UserMemories, ChatMessages])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
@@ -97,6 +106,40 @@ class AppDatabase extends _$AppDatabase {
   Future<int> get memoryCount async {
     final count = await userMemories.count().getSingle();
     return count;
+  }
+
+  // ── Chat Messages ──
+
+  /// Save a chat message to history
+  Future<void> saveMessage({
+    required String text,
+    required bool isUser,
+    required bool isSystem,
+    required DateTime timestamp,
+  }) async {
+    await into(chatMessages).insert(
+      ChatMessagesCompanion(
+        text: Value(text),
+        isUser: Value(isUser),
+        isSystem: Value(isSystem),
+        timestamp: Value(timestamp),
+      ),
+    );
+  }
+
+  /// Load recent messages (most recent first, limited)
+  Future<List<ChatMessageData>> loadRecentMessages({int limit = 50}) async {
+    return (select(chatMessages)
+          ..orderBy([
+            (t) => OrderingTerm(expression: t.timestamp, mode: OrderingMode.asc),
+          ])
+          ..limit(limit))
+        .get();
+  }
+
+  /// Clear all chat history
+  Future<void> clearHistory() async {
+    await delete(chatMessages).go();
   }
 }
 

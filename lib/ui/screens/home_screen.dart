@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -59,7 +60,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => const _SettingsScreen(),
+                  builder: (_) => const SettingsScreen(),
                 ),
               );
             },
@@ -467,124 +468,3 @@ class _MicButton extends StatelessWidget {
   }
 }
 
-// ── Settings Screen (inline for now) ──
-
-class _SettingsScreen extends ConsumerStatefulWidget {
-  const _SettingsScreen();
-
-  @override
-  ConsumerState<_SettingsScreen> createState() => _SettingsScreenState();
-}
-
-class _SettingsScreenState extends ConsumerState<_SettingsScreen> {
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final authNotifier = ref.watch(authStateProvider.notifier);
-    final authService = ref.watch(authServiceProvider);
-
-    return Scaffold(
-      backgroundColor: theme.colorScheme.surface,
-      appBar: AppBar(
-        title: Text(
-          'Settings',
-          style: TextStyle(
-            color: theme.colorScheme.primary,
-            letterSpacing: 2,
-            fontWeight: FontWeight.w300,
-          ),
-        ),
-        backgroundColor: theme.colorScheme.surface,
-        elevation: 0,
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          // Biometric section
-          Text(
-            'SECURITY',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.primary,
-              letterSpacing: 2,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Card(
-            color: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
-            child: FutureBuilder<({bool available, bool enabled})>(
-              future: () async {
-                final available = await authService.isBiometricAvailable;
-                final enabled = await authService.isBiometricEnabled;
-                return (available: available, enabled: enabled);
-              }(),
-              builder: (context, snapshot) {
-                final data = snapshot.data;
-                final available = data?.available ?? false;
-                final enabled = data?.enabled ?? false;
-                return SwitchListTile(
-                  title: const Text('Biometric Lock'),
-                  subtitle: Text(
-                    available
-                        ? 'Require fingerprint or face to unlock'
-                        : 'No biometric hardware detected',
-                  ),
-                  value: enabled && available,
-                  onChanged: available
-                      ? (value) => authNotifier.setBiometricEnabled(value)
-                      : null,
-                  activeTrackColor: theme.colorScheme.primary.withAlpha(128),
-                );
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-
-          // Memory section
-          Text(
-            'MEMORY',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.primary,
-              letterSpacing: 2,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Card(
-            color: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
-            child: ListTile(
-              leading: Icon(Icons.memory, color: theme.colorScheme.primary),
-              title: const Text('View Stored Memories'),
-              subtitle: const Text('Review what J.A.R.V.I.S. remembers'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () {
-                // TODO: Memory viewer screen
-              },
-            ),
-          ),
-          const SizedBox(height: 24),
-
-          // About section
-          Text(
-            'ABOUT',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.primary,
-              letterSpacing: 2,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Card(
-            color: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
-            child: const Column(
-              children: [
-                ListTile(
-                  leading: Icon(Icons.info_outline),
-                  title: Text('J.A.R.V.I.S. Phase 1'),
-                  subtitle: Text('Prototype — Pixel 7 / Android 16+'),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
