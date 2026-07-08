@@ -5,6 +5,7 @@
 // Gemini's server-side VAD handles speech detection and turn management.
 
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:logging/logging.dart';
@@ -30,6 +31,7 @@ class AudioPipeline {
   // State
   AudioPipelineState _state = AudioPipelineState.idle;
   StreamSubscription<Uint8List>? _audioSubscription;
+  int _framesCaptured = 0;
 
   // Callbacks
   void Function(AudioPipelineState state)? onStateChanged;
@@ -74,6 +76,15 @@ class AudioPipeline {
       // Stream audio frames to Gemini Live
       _audioSubscription = stream.listen(
         (audioFrame) {
+          _framesCaptured++;
+          // Periodic metering: log RMS level every 50 frames (~5s)
+          // to help debug "no response" / silent-mic issues.
+          if (_framesCaptured % 50 == 1) {
+            final rms = _computeRms(audioFrame);
+            final level = (rms / 32768 * 100).round().clamp(0, 100);
+            _log.info('Mic meter: frame #$_framesCaptured, '
+                '${audioFrame.length}B, level=$level%');
+          }
           _llmProvider.sendAudio(audioFrame);
         },
         onError: (error) {
@@ -122,5 +133,21 @@ class AudioPipeline {
   Future<void> dispose() async {
     await stopListening();
     _recorder.dispose();
+  }
+
+  /// Compute RMS (root-mean-square) of PCM16 samples for metering.
+  static double _computeRms(Uint8List pcm) {
+    if (pcm.length < 2) return 0;
+    final samples = pcm.length ~/ 2;
+    var sumSquares = 0.0;
+    for (int i = 0; i < samples; i++) {
+      // PCM16 little-endian → signed 16-bit
+      final lo = pcm[i * 2];
+      final hi = pcm[i * 2 + 1];
+      final sample = (hi << 8) | lo;
+      final signed = sample > 32767 ? sample - 65536 : sample;
+      sumSquares += signed * signed;
+    }
+    return sqrt(sumSquares / samples);
   }
 }

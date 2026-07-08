@@ -402,7 +402,10 @@ class GeminiLiveProvider implements LlmProvider {
         final body = await response.transform(utf8.decoder).join();
 
         if (response.statusCode != 200) {
-          _log.severe('Token endpoint returned ${response.statusCode}: $body');
+          // Redact response body — backend errors may leak secrets or
+          // partial token material in error messages.
+          _log.severe('Token endpoint returned ${response.statusCode} '
+              '(${body.length} bytes)');
           return null;
         }
 

@@ -8,7 +8,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:home_widget/home_widget.dart';
 import 'package:logging/logging.dart';
 
-import '../data/database.dart' hide ChatMessage;
 import '../providers/database_provider.dart';
 import '../providers/llm_provider.dart';
 import '../providers/llm_provider_provider.dart';
@@ -97,6 +96,9 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   // Audio playback
   final AudioPlayer _audioPlayer = AudioPlayer();
   final List<int> _audioBuffer = [];
+  bool _isPlayingAudio = false;
+  bool _isCommitting = false;
+  Completer<void>? _playbackCompleter;
 
   // ─────────────────────────────────────────────
   // Gemini native audio model outputs 24 kHz PCM.
@@ -104,7 +106,6 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   // standard rates, so we upsample to 48 kHz
   // (2× nearest-neighbour) before WAV encoding.
   // ─────────────────────────────────────────────
-  static const _geminiInputRate = 24000;
   static const _playbackSampleRate = 48000;
   static const _geminiBitsPerSample = 16;
   static const _geminiChannels = 1;
@@ -202,6 +203,12 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         _log.info('Barge-in detected: stopping playback and clearing buffers');
         _audioPlayer.stop();
         _audioBuffer.clear();
+        // Resolve any pending playback completer so _playBufferedAudio()
+        // doesn't leak waiting on a 30s timeout after we've already stopped.
+        if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
+          _playbackCompleter!.complete();
+        }
+        _isPlayingAudio = false;
         // Discard partial response since it was interrupted
         if (state.currentResponse.isNotEmpty) {
           state = state.copyWith(currentResponse: '');
@@ -357,6 +364,17 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // Guard against sending text while connection is still in progress
     if (state.sessionState == ChatSessionState.connecting) return;
 
+    // If JARVIS is currently speaking, stop playback before sending
+    // a new prompt so the speaking state doesn't overwrite thinking.
+    if (state.sessionState == ChatSessionState.speaking) {
+      await _audioPlayer.stop();
+      _audioBuffer.clear();
+      if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
+        _playbackCompleter!.complete();
+      }
+      _isPlayingAudio = false;
+    }
+
     // Add user message to chat history
     final message = ChatMessage(
       text: text,
@@ -467,6 +485,14 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   /// Commits the current streaming response to message history.
   /// Returns true if audio playback was triggered.
   bool _commitResponse() {
+    // Guard against duplicate commits — turnComplete, stopListening,
+    // and toggleListening can all call this in quick succession.
+    if (_isCommitting) {
+      _log.info('_commitResponse: already committing, skipping');
+      return false;
+    }
+    _isCommitting = true;
+
     final hasText = state.currentResponse.isNotEmpty;
     final hasAudio = _audioBuffer.isNotEmpty;
 
@@ -512,8 +538,10 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // models (audioOnly) send only InlineDataPart, no TextPart.
     if (hasAudio) {
       _playBufferedAudio();
+      _isCommitting = false;
       return true;
     }
+    _isCommitting = false;
     return false;
   }
 
@@ -524,10 +552,17 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   /// Android playback.
   Future<void> _playBufferedAudio() async {
     if (_audioBuffer.isEmpty) return;
+    // Don't start a new playback if one is already in progress
+    // (e.g. back-to-back turnComplete events).
+    if (_isPlayingAudio) {
+      _log.info('_playBufferedAudio: already playing, skipping');
+      return;
+    }
 
     _log.info('Playing TTS audio: ${_audioBuffer.length} raw PCM bytes');
 
     // Signal that JARVIS is speaking
+    _isPlayingAudio = true;
     state = state.copyWith(sessionState: ChatSessionState.speaking);
     _pushWidgetState('speaking');
 
@@ -544,10 +579,15 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
 
       await _audioPlayer.stop(); // Stop any previous playback
 
+      // Buffer data has been copied into the WAV; clear now so a
+      // concurrent turnComplete doesn't replay the same audio.
+      _audioBuffer.clear();
+
       // Wait for playback to complete before transitioning state.
       // audioplayers' play() returns as soon as playback *starts*,
       // not when it finishes, so we use onPlayerComplete.
-      final completer = Completer<void>();
+      _playbackCompleter = Completer<void>();
+      final completer = _playbackCompleter!;
       late StreamSubscription<void> completeSub;
       completeSub = _audioPlayer.onPlayerComplete.listen((_) {
         _log.info('Audio playback completed');
@@ -556,11 +596,8 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       });
 
       await _audioPlayer.play(BytesSource(wavBytes));
-      _log.info('Playing TTS audio (${_audioBuffer.length} PCM bytes → '
-          '${resampled.length} resampled → ${wavBytes.length} WAV bytes)');
-
-      // Buffer data has been copied into the WAV; safe to clear now.
-      _audioBuffer.clear();
+      _log.info('Playing TTS audio (${resampled.length} resampled → '
+          '${wavBytes.length} WAV bytes)');
 
       // Wait for playback to finish (with timeout safety)
       await completer.future.timeout(
@@ -573,8 +610,11 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     } catch (e) {
       _log.warning('Audio playback failed: $e');
     } finally {
+      _isPlayingAudio = false;
+      _playbackCompleter = null;
       // Return to listening state after playback completes,
       // unless interrupted (barge-in may have changed the state)
+      // or a new text prompt set it to thinking.
       if (state.sessionState == ChatSessionState.speaking) {
         state = state.copyWith(sessionState: ChatSessionState.listening);
         _pushWidgetState('listening');
@@ -690,7 +730,10 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
 
   @override
   void dispose() {
-    endSession();
+    // Fire-and-forget teardown — endSession() is async but dispose() is
+    // synchronous. We cancel subscriptions synchronously to prevent
+    // leaks, then let endSession() finish in the background.
+    unawaited(endSession());
     _audioPlayer.dispose();
     super.dispose();
   }

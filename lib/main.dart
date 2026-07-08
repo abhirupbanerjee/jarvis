@@ -1,6 +1,7 @@
 // lib/main.dart — J.A.R.V.I.S. Phase 1 Entry Point
 
 import 'package:alarm/alarm.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,7 +16,9 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // ── Setup structured logging ──
-  Logger.root.level = Level.ALL;
+  // Use verbose logs in debug builds; limit to warnings+ in release
+  // to avoid thousands of debugPrint calls per voice session.
+  Logger.root.level = kDebugMode ? Level.ALL : Level.WARNING;
   Logger.root.onRecord.listen((record) {
     final time = record.time.toIso8601String().substring(11, 23);
     final level = record.level.name.padRight(7);
