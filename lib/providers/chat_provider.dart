@@ -271,6 +271,11 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         state.sessionState != ChatSessionState.speaking) {
       return;
     }
+    // Stop any in-progress or pending audio playback before committing
+    // to prevent race condition where _playBufferedAudio() fires after
+    // we set state to idle.
+    await _audioPlayer.stop();
+    _audioBuffer.clear();
     _commitResponse();
     await _audioPipeline?.stopListening();
     // Remove stale "Listening..." system message when session ends
@@ -287,6 +292,9 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
 
   /// End the chat session completely
   Future<void> endSession() async {
+    // Stop any active audio playback before tearing down the session
+    await _audioPlayer.stop();
+    _audioBuffer.clear();
     await _audioPipeline?.dispose();
     _audioPipeline = null;
     await _textSub?.cancel();
@@ -310,6 +318,21 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     );
     _pushWidgetState('idle');
     _log.info('Chat session ended');
+  }
+
+  /// Clear all chat messages from state and database, ending any active
+  /// session. Resets back to a clean idle state.
+  Future<void> clearChat() async {
+    // End any active session first (stops audio, disconnects, etc.)
+    await endSession();
+
+    // Clear persisted chat history from the database
+    final db = _ref.read(databaseProvider);
+    await db.clearHistory();
+
+    // Reset to pristine initial state with no messages
+    state = state.copyWith(messages: []);
+    _log.info('Chat history cleared');
   }
 
   /// Send a text prompt and add it to chat history as a user message.
@@ -520,13 +543,36 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       );
 
       await _audioPlayer.stop(); // Stop any previous playback
+
+      // Wait for playback to complete before transitioning state.
+      // audioplayers' play() returns as soon as playback *starts*,
+      // not when it finishes, so we use onPlayerComplete.
+      final completer = Completer<void>();
+      late StreamSubscription<void> completeSub;
+      completeSub = _audioPlayer.onPlayerComplete.listen((_) {
+        _log.info('Audio playback completed');
+        completeSub.cancel();
+        if (!completer.isCompleted) completer.complete();
+      });
+
       await _audioPlayer.play(BytesSource(wavBytes));
       _log.info('Playing TTS audio (${_audioBuffer.length} PCM bytes → '
           '${resampled.length} resampled → ${wavBytes.length} WAV bytes)');
+
+      // Buffer data has been copied into the WAV; safe to clear now.
+      _audioBuffer.clear();
+
+      // Wait for playback to finish (with timeout safety)
+      await completer.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          completeSub.cancel();
+          _log.warning('Audio playback timed out after 30s');
+        },
+      );
     } catch (e) {
       _log.warning('Audio playback failed: $e');
     } finally {
-      _audioBuffer.clear();
       // Return to listening state after playback completes,
       // unless interrupted (barge-in may have changed the state)
       if (state.sessionState == ChatSessionState.speaking) {
@@ -540,6 +586,12 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   /// Each 16-bit mono sample is duplicated once so the waveform
   /// shape is preserved while making the rate Android-friendly.
   static Uint8List _resample24to48(Uint8List pcm24) {
+    // Guard against misaligned PCM data (shouldn't happen with PCM16,
+    // but a network interruption could produce an odd-length chunk)
+    if (pcm24.length % 2 != 0) {
+      _log.warning(
+        'PCM data has odd length (${pcm24.length}), dropping last byte');
+    }
     // 16-bit mono → 2 bytes per sample
     final samples = pcm24.length ~/ 2;
     final out = Uint8List(samples * 4); // 2× samples, 2 bytes each

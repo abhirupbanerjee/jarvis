@@ -51,6 +51,34 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  void _showClearConfirmDialog(BuildContext context, ChatNotifier chat) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear chat history?'),
+        content: const Text(
+          'This will remove all messages and start a fresh conversation.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              chat.clearChat();
+            },
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+            ),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _scrollController.removeListener(_onScrollChanged);
@@ -85,6 +113,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         actions: [
           // Connection status indicator
           _ConnectionIndicator(state: chatData.sessionState),
+          // Clear chat button (only visible when there are messages)
+          if (hasMessages)
+            IconButton(
+              icon: Icon(
+                Icons.delete_outline,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              tooltip: 'Clear chat',
+              onPressed: () => _showClearConfirmDialog(context, chat),
+            ),
           // Settings button
           IconButton(
             icon: Icon(
