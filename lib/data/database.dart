@@ -27,7 +27,7 @@ class UserMemories extends Table {
 /// Chat message history table
 class ChatMessages extends Table {
   IntColumn get id => integer().autoIncrement()();
-  TextColumn get text => text()();
+  TextColumn get content => text()();
   BoolColumn get isUser => boolean()();
   BoolColumn get isSystem => boolean()();
   DateTimeColumn get timestamp => dateTime().withDefault(currentDateAndTime)();
@@ -112,14 +112,14 @@ class AppDatabase extends _$AppDatabase {
 
   /// Save a chat message to history
   Future<void> saveMessage({
-    required String text,
+    required String content,
     required bool isUser,
     required bool isSystem,
     required DateTime timestamp,
   }) async {
     await into(chatMessages).insert(
       ChatMessagesCompanion(
-        text: Value(text),
+        content: Value(content),
         isUser: Value(isUser),
         isSystem: Value(isSystem),
         timestamp: Value(timestamp),
@@ -128,7 +128,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   /// Load recent messages (most recent first, limited)
-  Future<List<ChatMessageData>> loadRecentMessages({int limit = 50}) async {
+  Future<List<ChatMessage>> loadRecentMessages({int limit = 50}) async {
     return (select(chatMessages)
           ..orderBy([
             (t) => OrderingTerm(expression: t.timestamp, mode: OrderingMode.asc),

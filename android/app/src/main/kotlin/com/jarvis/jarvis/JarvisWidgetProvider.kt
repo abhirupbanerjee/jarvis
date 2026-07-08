@@ -2,6 +2,7 @@ package com.jarvis.jarvis
 
 import android.appwidget.AppWidgetManager
 import android.content.Context
+import android.content.SharedPreferences
 import android.widget.RemoteViews
 import es.antonborri.home_widget.HomeWidgetProvider
 
@@ -9,16 +10,13 @@ class JarvisWidgetProvider : HomeWidgetProvider() {
     override fun onUpdate(
         context: Context,
         appWidgetManager: AppWidgetManager,
-        appWidgetIds: IntArray
+        appWidgetIds: IntArray,
+        widgetData: SharedPreferences
     ) {
         for (appWidgetId in appWidgetIds) {
             val views = RemoteViews(context.packageName, R.layout.widget_layout)
 
-            val prefs = context.getSharedPreferences(
-                "FlutterWidget",
-                Context.MODE_PRIVATE
-            )
-            val status = prefs.getString("widget_status", "Tap to speak") ?: "Tap to speak"
+            val status = widgetData.getString("widget_status", "Tap to speak") ?: "Tap to speak"
             val statusText = when (status) {
                 "listening" -> "Listening..."
                 "speaking" -> "Speaking..."

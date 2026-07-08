@@ -127,7 +127,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () async {
                     final changed = await showChangePinDialog(context, authService);
-                    if (changed && mounted) {
+                    if (changed == true && mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(content: Text('PIN changed successfully')),
                       );
@@ -237,10 +237,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const SizedBox(height: 8),
           Card(
             color: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
-            child: const Column(
+            child: Column(
               children: [
                 ListTile(
-                  leading: Icon(Icons.info_outline),
+                  leading: const Icon(Icons.info_outline),
                   title: Text('J.A.R.V.I.S. ${AppConfig.versionLabel}'),
                   subtitle: const Text('Prototype — Pixel 7 / Android 16+'),
                 ),

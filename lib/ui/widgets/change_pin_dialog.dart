@@ -8,7 +8,7 @@ import 'package:flutter/services.dart';
 import '../../services/auth_service.dart';
 
 /// Show the "Change PIN" dialog. Returns true if PIN was changed.
-Future<bool> showChangePinDialog(BuildContext context, AuthService authService) {
+Future<bool?> showChangePinDialog(BuildContext context, AuthService authService) {
   final oldPinController = TextEditingController();
   final newPinController = TextEditingController();
   final confirmPinController = TextEditingController();

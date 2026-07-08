@@ -2,11 +2,11 @@ package com.jarvis.jarvis
 
 import android.content.Context
 import android.content.Intent
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
     private val APP_LAUNCHER_CHANNEL = "com.jarvis.jarvis/app_launcher"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {

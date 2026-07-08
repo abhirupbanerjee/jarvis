@@ -193,11 +193,11 @@ class GeminiLiveProvider implements LlmProvider {
       case gai.BidiGenerateContentToolCall(:final functionCalls):
         for (final call in functionCalls) {
           _toolCallStreamController.add(FunctionCall(
-            id: call.id ?? '',
+            id: call.id ?? 'call_${DateTime.now().millisecondsSinceEpoch}',
             name: call.name,
             args: _safeArgs(call.args),
           ));
-          _log.info('Function call received: ${call.name}');
+          _log.info('Function call received: ${call.name} id=${call.id}');
         }
 
       // Tool call cancellation (user interrupted before tools executed)
@@ -215,11 +215,6 @@ class GeminiLiveProvider implements LlmProvider {
         if (interrupted == true) {
           _log.info('Model interrupted by user speech (barge-in)');
           _interruptionStreamController.add(null);
-        }
-        // Signal turn completion so audio/text can be committed
-        if (turnComplete == true) {
-          _log.info('Model turn complete — signalling commit');
-          _turnCompleteStreamController.add(null);
         }
         _log.info('ServerContent: modelTurn=${modelTurn != null}, parts=${modelTurn?.parts.length ?? 0}, interrupted=$interrupted, turnComplete=$turnComplete');
         if (modelTurn != null) {
@@ -240,6 +235,12 @@ class GeminiLiveProvider implements LlmProvider {
               _audioStreamController.add(decoded);
             }
           }
+        }
+        // Signal turn completion AFTER parts are processed so
+        // _commitResponse() sees the buffered text and audio.
+        if (turnComplete == true) {
+          _log.info('Model turn complete — signalling commit');
+          _turnCompleteStreamController.add(null);
         }
 
       // Setup complete

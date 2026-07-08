@@ -130,6 +130,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
         },
       ),
     );
+  }
 }
 
 class _CategorySection extends StatelessWidget {

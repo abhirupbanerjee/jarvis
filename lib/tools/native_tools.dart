@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_system_action/flutter_system_action.dart';
 import 'package:intl/intl.dart';
+import 'package:timezone/timezone.dart' as tz;
 import 'package:vibration/vibration.dart';
 
 import 'tool_registry.dart';
@@ -163,7 +164,11 @@ final setTimerTool = ToolDefinition(
     final timerId = DateTime.now().millisecondsSinceEpoch;
 
     try {
-      final scheduledTime = DateTime.now().add(Duration(seconds: durationSeconds));
+      final now = DateTime.now();
+      final scheduledTime = tz.TZDateTime.from(
+        now.add(Duration(seconds: durationSeconds)),
+        tz.local,
+      );
       await FlutterLocalNotificationsPlugin().zonedSchedule(
         timerId,
         'J.A.R.V.I.S. Timer',
@@ -180,6 +185,8 @@ final setTimerTool = ToolDefinition(
         ),
         androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
         matchDateTimeComponents: DateTimeComponents.time,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
       );
 
       return {

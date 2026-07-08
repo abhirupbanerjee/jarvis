@@ -8,7 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:home_widget/home_widget.dart';
 import 'package:logging/logging.dart';
 
-import '../data/database.dart';
+import '../data/database.dart' hide ChatMessage;
 import '../providers/database_provider.dart';
 import '../providers/llm_provider.dart';
 import '../providers/llm_provider_provider.dart';
@@ -99,9 +99,13 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   final List<int> _audioBuffer = [];
 
   // ─────────────────────────────────────────────
-  // Gemini Live API sample rate for textAndAudio mode
+  // Gemini native audio model outputs 24 kHz PCM.
+  // Android AudioTrack exhibits stutter at non-
+  // standard rates, so we upsample to 48 kHz
+  // (2× nearest-neighbour) before WAV encoding.
   // ─────────────────────────────────────────────
-  static const _geminiSampleRate = 24000;
+  static const _geminiInputRate = 24000;
+  static const _playbackSampleRate = 48000;
   static const _geminiBitsPerSample = 16;
   static const _geminiChannels = 1;
 
@@ -132,15 +136,23 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       _connectionSub = llmProvider.connectionStateStream.listen(
         (connState) {
           if (connState == ConnectionState.error) {
-            // Only show error if session was already active — transient
-            // reconnects during initial connect() should not flash "Error".
+            // Handle both initial connection failure and mid-session drops
             final isActive = state.sessionState == ChatSessionState.listening ||
                 state.sessionState == ChatSessionState.thinking ||
                 state.sessionState == ChatSessionState.speaking;
+            final isConnecting =
+                state.sessionState == ChatSessionState.connecting;
             if (isActive) {
               state = state.copyWith(
                 sessionState: ChatSessionState.error,
                 lastError: 'Connection lost. Tap mic to retry.',
+              );
+            } else if (isConnecting) {
+              // Initial connect() failed — set error so startSession()
+              // can detect it and stop further setup.
+              state = state.copyWith(
+                sessionState: ChatSessionState.error,
+                lastError: 'Connection failed. Check your API key.',
               );
             }
           }
@@ -161,12 +173,16 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       // Wire up tool call stream
       _toolSub = llmProvider.toolCallStream.listen(
         (call) {
+          _log.info('_toolSub FIRED: ${call.name}, args=${call.args}');
           state = state.copyWith(
             toolStatus: 'Working: ${call.name}...',
           );
           _executeTool(call);
         },
-        onError: _handleError,
+        onError: (e, st) {
+          _log.severe('_toolSub error', e, st);
+          _handleError(e);
+        },
       );
 
       // Wire up audio stream — buffer PCM data for TTS playback
@@ -211,12 +227,15 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         tools: toolDeclarations,
       );
 
+      // If connect() failed (model rejected config, auth error, etc.),
+      // the connection-state listener already set state to error — stop.
+      if (state.sessionState == ChatSessionState.error) return;
+
       // Load chat history from database
-      final db = _ref.read(databaseProvider);
       final history = await db.loadRecentMessages();
       if (history.isNotEmpty) {
         final loadedMessages = history.map((m) => ChatMessage(
-          text: m.text,
+          text: m.content,
           isUser: m.isUser,
           isSystem: m.isSystem,
           timestamp: m.timestamp,
@@ -296,7 +315,25 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   /// Send a text prompt and add it to chat history as a user message.
   /// The model's response streams in via the existing _textSub listener
   /// and is committed on turnComplete via _commitResponse().
+  ///
+  /// If the session is idle (not yet started), it auto-starts the session
+  /// before sending. This allows text-only input without requiring a
+  /// prior mic tap.
   Future<void> sendTextPrompt(String text) async {
+    // Auto-start session if not already active.
+    // NOTE: Do NOT set state to connecting here — startSession() checks
+    // for idle state and will bail out early if state is already changed.
+    if (state.sessionState == ChatSessionState.idle ||
+        state.sessionState == ChatSessionState.error) {
+      await startSession();
+      // If session failed to start, don't proceed (error message
+      // is already set by startSession's error handler)
+      if (state.sessionState != ChatSessionState.listening) return;
+    }
+
+    // Guard against sending text while connection is still in progress
+    if (state.sessionState == ChatSessionState.connecting) return;
+
     // Add user message to chat history
     final message = ChatMessage(
       text: text,
@@ -429,10 +466,27 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
 
       // Persist to database (fire-and-forget)
       _persistMessage(message);
+    } else if (hasAudio) {
+      // Audio-only mode (gemini-2.5-flash-native-audio): no TextPart
+      // arrived, but we have audio. Insert a placeholder so the chat
+      // history isn't empty and the user knows a response was given.
+      final message = ChatMessage(
+        text: '🎤 Voice response',
+        isUser: false,
+        timestamp: DateTime.now(),
+      );
+      state = state.copyWith(
+        messages: [
+          ...state.messages,
+          message,
+        ],
+        currentResponse: '',
+      );
+      _persistMessage(message);
     }
 
-    // Play audio regardless of whether text arrived — Gemini may respond
-    // with audio-only (textAndAudio mode without transcription).
+    // Play audio regardless of whether text arrived — native audio
+    // models (audioOnly) send only InlineDataPart, no TextPart.
     if (hasAudio) {
       _playBufferedAudio();
       return true;
@@ -443,7 +497,8 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   // ── Audio Playback ──
 
   /// Play buffered PCM audio from Gemini TTS via audioplayers.
-  /// Converts raw PCM to a WAV container in memory before playback.
+  /// Resamples 24 kHz → 48 kHz then encodes to WAV for smooth
+  /// Android playback.
   Future<void> _playBufferedAudio() async {
     if (_audioBuffer.isEmpty) return;
 
@@ -454,16 +509,20 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     _pushWidgetState('speaking');
 
     try {
+      // Upsample 24 kHz → 48 kHz (2× nearest-neighbour) so Android
+      // AudioTrack handles the stream natively without resampling.
+      final resampled = _resample24to48(Uint8List.fromList(_audioBuffer));
       final wavBytes = _pcmToWav(
-        pcmData: Uint8List.fromList(_audioBuffer),
-        sampleRate: _geminiSampleRate,
+        pcmData: resampled,
+        sampleRate: _playbackSampleRate,
         bitsPerSample: _geminiBitsPerSample,
         channels: _geminiChannels,
       );
 
       await _audioPlayer.stop(); // Stop any previous playback
       await _audioPlayer.play(BytesSource(wavBytes));
-      _log.info('Playing TTS audio (${_audioBuffer.length} PCM bytes → ${wavBytes.length} WAV bytes)');
+      _log.info('Playing TTS audio (${_audioBuffer.length} PCM bytes → '
+          '${resampled.length} resampled → ${wavBytes.length} WAV bytes)');
     } catch (e) {
       _log.warning('Audio playback failed: $e');
     } finally {
@@ -475,6 +534,26 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         _pushWidgetState('listening');
       }
     }
+  }
+
+  /// Nearest-neighbour upsample 24 000 → 48 000 Hz (2×).
+  /// Each 16-bit mono sample is duplicated once so the waveform
+  /// shape is preserved while making the rate Android-friendly.
+  static Uint8List _resample24to48(Uint8List pcm24) {
+    // 16-bit mono → 2 bytes per sample
+    final samples = pcm24.length ~/ 2;
+    final out = Uint8List(samples * 4); // 2× samples, 2 bytes each
+    for (int i = 0; i < samples; i++) {
+      final lo = pcm24[i * 2];
+      final hi = pcm24[i * 2 + 1];
+      // Write the same sample twice (nearest-neighbour 2×)
+      final dst = i * 4;
+      out[dst] = lo;
+      out[dst + 1] = hi;
+      out[dst + 2] = lo;
+      out[dst + 3] = hi;
+    }
+    return out;
   }
 
   /// Encode raw 16-bit PCM samples into a WAV container.
@@ -537,7 +616,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     try {
       final db = _ref.read(databaseProvider);
       db.saveMessage(
-        text: message.text,
+        content: message.text,
         isUser: message.isUser,
         isSystem: message.isSystem,
         timestamp: message.timestamp,
