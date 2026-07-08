@@ -219,19 +219,19 @@ class GeminiLiveProvider implements LlmProvider {
         _log.info('ServerContent: modelTurn=${modelTurn != null}, parts=${modelTurn?.parts.length ?? 0}, interrupted=$interrupted, turnComplete=$turnComplete');
         if (modelTurn != null) {
           for (final part in modelTurn.parts) {
-            _log.info('  Part: ${part.runtimeType}');
+            _log.fine('  Part: ${part.runtimeType}');
             if (part is gai.TextPart && part.text.isNotEmpty) {
               // Skip model thinking/reasoning — only stream final response text
               if (part.thought == true) {
                 _log.fine('Skipping thought: "${part.text.length > 50 ? '${part.text.substring(0, 50)}...' : part.text}"');
                 continue;
               }
-              _log.info('Gemini text: "${part.text.length > 80 ? '${part.text.substring(0, 80)}...' : part.text}"');
+              _log.fine('Gemini text: "${part.text.length > 80 ? '${part.text.substring(0, 80)}...' : part.text}"');
               _textStreamController.add(part.text);
             }
             if (part is gai.InlineDataPart) {
               final decoded = base64Decode(part.inlineData.data);
-              _log.info('Gemini audio: ${decoded.length} PCM bytes');
+              _log.fine('Gemini audio: ${decoded.length} PCM bytes');
               _audioStreamController.add(decoded);
             }
           }
@@ -249,7 +249,7 @@ class GeminiLiveProvider implements LlmProvider {
 
       // Resumption token
       case gai.SessionResumptionUpdate():
-        _log.info('Resumption token updated');
+        _log.fine('Resumption token updated');
 
       // Server drain
       case gai.GoAway():
@@ -258,12 +258,28 @@ class GeminiLiveProvider implements LlmProvider {
 
       // Unknown
       default:
-        _log.info('Unknown message: ${message.runtimeType} — $message');
+        _log.fine('Unknown message: ${message.runtimeType} — $message');
     }
   }
 
   void _handleStreamError(Object error) {
     _log.severe('Stream error', error);
+
+    // Detect DNS/network failures — reconnection won't help
+    final errorStr = error.toString();
+    final isNetworkFailure = errorStr.contains('SocketException') ||
+        errorStr.contains('No address associated with hostname') ||
+        errorStr.contains('Failed host lookup') ||
+        errorStr.contains('Connection reset by peer') ||
+        errorStr.contains('Connection timed out');
+
+    if (isNetworkFailure) {
+      _log.severe('Network failure detected — stopping reconnection attempts');
+      _retryCount = _maxRetries; // prevent further retries
+      _emitConnectionState(ConnectionState.error);
+      return;
+    }
+
     _emitConnectionState(ConnectionState.error);
   }
 
@@ -319,7 +335,7 @@ class GeminiLiveProvider implements LlmProvider {
       return;
     }
     if (_audioFramesSent % 50 == 1) {
-      _log.info('sendAudio: #$_audioFramesSent, ${pcmBytes.length}B, session=${_session != null}');
+      _log.fine('sendAudio: #$_audioFramesSent, ${pcmBytes.length}B, session=${_session != null}');
     }
     _session!.sendAudio(pcmBytes);
   }

@@ -8,7 +8,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
-import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import 'settings_screen.dart';
 
@@ -113,6 +112,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         actions: [
           // Connection status indicator
           _ConnectionIndicator(state: chatData.sessionState),
+          // Help button — shows the welcome guide anytime
+          IconButton(
+            icon: Icon(
+              Icons.help_outline,
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+            tooltip: 'How to use JARVIS',
+            onPressed: () => _showWelcomeGuide(context, chat),
+          ),
           // Clear chat button (only visible when there are messages)
           if (hasMessages)
             IconButton(
@@ -165,13 +173,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         isNearBottom: _isNearBottom,
                         sessionState: chatData.sessionState,
                       )
-                    : _EmptyState(),
+                    : _EmptyState(chat: chat),
               ),
 
               // Bottom input bar (text field + mic button)
               _InputBar(
                 state: chatData.sessionState,
                 onMicTap: chat.toggleListening,
+                onStopTap: chat.stopResponding,
                 textController: _textController,
                 onSendText: (text) {
                   ref.read(chatProvider.notifier).sendTextPrompt(text);
@@ -207,7 +216,7 @@ class _ConnectionIndicator extends StatelessWidget {
       ChatSessionState.connecting => (Colors.orange, 'Connecting...'),
       ChatSessionState.listening => (Colors.green, 'Listening'),
       ChatSessionState.thinking => (theme.colorScheme.primary, 'Thinking...'),
-      ChatSessionState.speaking => (Colors.green, 'Speaking'),
+      ChatSessionState.speaking => (Colors.teal, 'Speaking'),
       ChatSessionState.error => (theme.colorScheme.error, 'Error'),
     };
 
@@ -345,38 +354,230 @@ class _ScrollToBottomButton extends StatelessWidget {
 }
 
 // ── Empty State ──
+// Shows a welcome guide for new users. The same guide is reachable via the
+// help icon in the app bar.
 
 class _EmptyState extends StatelessWidget {
+  final ChatNotifier chat;
+
+  const _EmptyState({required this.chat});
+
+  @override
+  Widget build(BuildContext context) {
+    return _WelcomeGuide(
+      chat: chat,
+      showTitle: true,
+      compact: false,
+    );
+  }
+}
+
+// ── Welcome Guide ──
+// Reusable onboarding content used in both the empty state and the help dialog.
+
+class _WelcomeGuide extends StatelessWidget {
+  final ChatNotifier chat;
+  final bool showTitle;
+  final bool compact;
+
+  const _WelcomeGuide({
+    required this.chat,
+    this.showTitle = true,
+    this.compact = false,
+  });
+
+  static const _examplePrompts = [
+    'What time is it?',
+    'Search for the latest news',
+    'Set a timer for 5 minutes',
+    'What is the weather today?',
+  ];
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Center(
+    return SingleChildScrollView(
+      padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 24, vertical: compact ? 0 : 16),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.mic_none,
-            size: 64,
-            color: theme.colorScheme.primary.withAlpha(80),
+          if (showTitle) ...[
+            Icon(
+              Icons.mic_none,
+              size: 56,
+              color: theme.colorScheme.primary.withAlpha(80),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'How to talk to J.A.R.V.I.S.',
+              style: theme.textTheme.titleMedium?.copyWith(
+                color: theme.colorScheme.onSurface,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+          ],
+          _GuideStep(
+            number: 1,
+            icon: Icons.mic,
+            title: 'Tap the mic button',
+            description: 'JARVIS starts listening. Wait for the "Speak now" hint.',
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
+          _GuideStep(
+            number: 2,
+            icon: Icons.record_voice_over,
+            title: 'Speak your request',
+            description: 'Ask a question or give a command in natural language.',
+          ),
+          const SizedBox(height: 12),
+          _GuideStep(
+            number: 3,
+            icon: Icons.volume_up,
+            title: 'Listen to the response',
+            description: 'JARVIS speaks back. Tap the red stop button anytime to interrupt.',
+          ),
+          const SizedBox(height: 12),
+          _GuideStep(
+            number: 4,
+            icon: Icons.mic,
+            title: 'Tap the mic again to continue',
+            description: 'After each response, the mic turns off. Tap to start a new turn.',
+          ),
+          const SizedBox(height: 24),
           Text(
-            'Tap the mic to start',
-            style: theme.textTheme.bodyLarge?.copyWith(
+            'Try saying:',
+            style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: 8),
-          Text(
-            'Try: "What time is it?" or "Search for the latest news"',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant.withAlpha(128),
-            ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            alignment: WrapAlignment.center,
+            children: _examplePrompts.map((prompt) {
+              return ActionChip(
+                avatar: Icon(
+                  Icons.chat_bubble_outline,
+                  size: 16,
+                  color: theme.colorScheme.primary,
+                ),
+                label: Text(prompt),
+                labelStyle: theme.textTheme.bodySmall,
+                backgroundColor: theme.colorScheme.surfaceContainerHighest.withAlpha(80),
+                side: BorderSide.none,
+                onPressed: () => chat.sendTextPrompt(prompt),
+              );
+            }).toList(),
           ),
+          if (!compact) ...[
+            const SizedBox(height: 24),
+            Text(
+              'You can also type a message when the session is idle.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant.withAlpha(128),
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ],
       ),
     );
   }
+}
+
+class _GuideStep extends StatelessWidget {
+  final int number;
+  final IconData icon;
+  final String title;
+  final String description;
+
+  const _GuideStep({
+    required this.number,
+    required this.icon,
+    required this.title,
+    required this.description,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: theme.colorScheme.primary.withAlpha(40),
+          ),
+          child: Center(
+            child: Text(
+              '$number',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(icon, size: 16, color: theme.colorScheme.primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    title,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 2),
+              Text(
+                description,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+void _showWelcomeGuide(BuildContext context, ChatNotifier chat) {
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      title: const Text('How to use J.A.R.V.I.S.'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: _WelcomeGuide(
+          chat: chat,
+          showTitle: false,
+          compact: true,
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('Got it'),
+        ),
+      ],
+    ),
+  );
 }
 
 // ── Chat Messages ──
@@ -494,7 +695,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
           children: List.generate(3, (i) {
             return AnimatedBuilder(
               animation: _controller,
-              builder: (_, __) {
+              builder: (_, child) {
                 final delay = i * 0.2;
                 final t = (_controller.value - delay).clamp(0.0, 1.0);
                 final opacity = (t < 0.5 ? t * 2 : 2 - t * 2).clamp(0.2, 1.0);
@@ -645,12 +846,14 @@ class _ChatBubble extends StatelessWidget {
 class _InputBar extends StatefulWidget {
   final ChatSessionState state;
   final VoidCallback onMicTap;
+  final VoidCallback onStopTap;
   final TextEditingController textController;
   final Function(String) onSendText;
 
   const _InputBar({
     required this.state,
     required this.onMicTap,
+    required this.onStopTap,
     required this.textController,
     required this.onSendText,
   });
@@ -684,6 +887,16 @@ class _InputBarState extends State<_InputBar> {
     }
   }
 
+  String _hintForState(ChatSessionState state) {
+    return switch (state) {
+      ChatSessionState.idle || ChatSessionState.error => 'Type a message...',
+      ChatSessionState.connecting => 'Connecting...',
+      ChatSessionState.listening => 'Speak now — I\'m listening...',
+      ChatSessionState.thinking => 'J.A.R.V.I.S. is thinking...',
+      ChatSessionState.speaking => 'J.A.R.V.I.S. is speaking...',
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -713,9 +926,7 @@ class _InputBarState extends State<_InputBar> {
               style: theme.textTheme.bodyMedium,
               textInputAction: TextInputAction.send,
               decoration: InputDecoration(
-                hintText: textEnabled
-                    ? 'Type a message...'
-                    : 'J.A.R.V.I.S. is responding...',
+                hintText: _hintForState(state),
                 hintStyle: theme.textTheme.bodyMedium?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant.withAlpha(100),
                 ),
@@ -736,8 +947,12 @@ class _InputBarState extends State<_InputBar> {
           // BUG-3 fix: send button when text is entered
           if (_hasText && textEnabled)
             _SendButton(onTap: _send),
-          // Mic button
-          _MicButton(state: state, onTap: widget.onMicTap, isConnecting: isConnecting),
+          // Stop button when JARVIS is thinking or speaking
+          if (state == ChatSessionState.thinking ||
+              state == ChatSessionState.speaking)
+            _StopButton(onTap: widget.onStopTap)
+          else
+            _MicButton(state: state, onTap: widget.onMicTap, isConnecting: isConnecting),
         ],
       ),
     );
@@ -772,7 +987,41 @@ class _SendButton extends StatelessWidget {
   }
 }
 
+// ── Stop Button ──
+
+class _StopButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _StopButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        width: 48,
+        height: 48,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.redAccent,
+        ),
+        child: const Icon(
+          Icons.stop_rounded,
+          color: Colors.white,
+          size: 24,
+        ),
+      ),
+    );
+  }
+}
+
 // ── Mic Button (UX-6: pulsing animation during listening) ──
+//
+// Tap-to-talk model:
+//   - idle: mic icon → tap to start session
+//   - listening: pulsing mic icon → JARVIS is listening
+//   - thinking: hourglass icon → JARVIS is processing
+//   - speaking: speaker icon → JARVIS is talking; tap to interrupt/end
 
 class _MicButton extends StatefulWidget {
   final ChatSessionState state;
@@ -835,10 +1084,25 @@ class _MicButtonState extends State<_MicButton>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    // BUG-6 fix: show stop icon for listening, thinking, and speaking
-    final isActive = widget.state == ChatSessionState.listening ||
-        widget.state == ChatSessionState.thinking ||
-        widget.state == ChatSessionState.speaking;
+    final state = widget.state;
+    // Active = session in progress (listening/thinking/speaking).
+    // Tapping during these states ends the session.
+    final isActive = state == ChatSessionState.listening ||
+        state == ChatSessionState.thinking ||
+        state == ChatSessionState.speaking;
+
+    // Choose icon + color per state to communicate the continuous
+    // conversation model (like Gemini Live):
+    //  - idle: mic icon (tap to start)
+    //  - listening: mic icon (pulsing) — JARVIS is listening continuously
+    //  - thinking: hourglass — JARVIS is processing
+    //  - speaking: speaker icon — JARVIS is talking (tap to interrupt/end)
+    final (icon, bgColor) = switch (state) {
+      ChatSessionState.listening => (Icons.mic, theme.colorScheme.primary),
+      ChatSessionState.thinking => (Icons.hourglass_top, theme.colorScheme.primary),
+      ChatSessionState.speaking => (Icons.volume_up, Colors.teal),
+      _ => (Icons.mic, theme.colorScheme.primary),
+    };
 
     final button = GestureDetector(
       onTap: widget.isConnecting
@@ -853,13 +1117,10 @@ class _MicButtonState extends State<_MicButton>
         height: 48,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: isActive ? theme.colorScheme.error : theme.colorScheme.primary,
+          color: bgColor,
           boxShadow: [
             BoxShadow(
-              color: (isActive
-                      ? theme.colorScheme.error
-                      : theme.colorScheme.primary)
-                  .withAlpha(60),
+              color: bgColor.withAlpha(60),
               blurRadius: isActive ? 12 : 6,
               spreadRadius: isActive ? 3 : 1,
             ),
@@ -877,7 +1138,7 @@ class _MicButtonState extends State<_MicButton>
                 ),
               )
             : Icon(
-                isActive ? Icons.stop : Icons.mic,
+                icon,
                 color: Colors.white,
                 size: 22,
               ),

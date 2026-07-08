@@ -99,6 +99,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   bool _isPlayingAudio = false;
   bool _isCommitting = false;
   Completer<void>? _playbackCompleter;
+  StreamSubscription<void>? _playbackCompleteSub;
 
   // ─────────────────────────────────────────────
   // Gemini native audio model outputs 24 kHz PCM.
@@ -146,14 +147,14 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
             if (isActive) {
               state = state.copyWith(
                 sessionState: ChatSessionState.error,
-                lastError: 'Connection lost. Tap mic to retry.',
+                lastError: 'Connection lost. Check your network and tap mic to retry.',
               );
             } else if (isConnecting) {
               // Initial connect() failed — set error so startSession()
               // can detect it and stop further setup.
               state = state.copyWith(
                 sessionState: ChatSessionState.error,
-                lastError: 'Connection failed. Check your API key.',
+                lastError: 'Connection failed. Check your API key and network.',
               );
             }
           }
@@ -163,7 +164,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       // Wire up text stream
       _textSub = llmProvider.textStream.listen(
         (text) {
-          _log.fine('Text received: "${text.length > 50 ? '${text.substring(0, 50)}...' : text}"');
+          _log.fine('Text received (${text.length} chars)');
           state = state.copyWith(
             currentResponse: state.currentResponse + text,
           );
@@ -190,7 +191,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       _audioBuffer.clear();
       _audioSub = llmProvider.audioStream.listen(
         (pcmChunk) {
-          _log.fine('Audio chunk: ${pcmChunk.length} bytes (total buffered: ${_audioBuffer.length + pcmChunk.length})');
+          _log.fine('Audio chunk: ${pcmChunk.length} bytes');
           _audioBuffer.addAll(pcmChunk);
         },
         onError: (e) {
@@ -201,14 +202,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       // Wire up interruption stream — handle barge-in (user interrupts AI)
       _interruptSub = llmProvider.interruptionStream.listen((_) {
         _log.info('Barge-in detected: stopping playback and clearing buffers');
-        _audioPlayer.stop();
-        _audioBuffer.clear();
-        // Resolve any pending playback completer so _playBufferedAudio()
-        // doesn't leak waiting on a 30s timeout after we've already stopped.
-        if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
-          _playbackCompleter!.complete();
-        }
-        _isPlayingAudio = false;
+        _abortPlaybackAndClearBuffers();
         // Discard partial response since it was interrupted
         if (state.currentResponse.isNotEmpty) {
           state = state.copyWith(currentResponse: '');
@@ -216,11 +210,30 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       });
 
       // Wire up turn-complete stream — auto-commit when model finishes generating
-      _turnCompleteSub = llmProvider.turnCompleteStream.listen((_) {
+      _turnCompleteSub = llmProvider.turnCompleteStream.listen((_) async {
         _log.info('Turn complete — committing response');
-        final audioTriggered = _commitResponse();
+
+        // If the model is responding and the last chat message isn't from the
+        // user, the input must have been voice. Insert a placeholder so the
+        // chat history shows that the user said something.
+        if (state.messages.isEmpty || !state.messages.last.isUser) {
+          final placeholder = ChatMessage(
+            text: '🎤 Voice input',
+            isUser: true,
+            timestamp: DateTime.now(),
+          );
+          state = state.copyWith(
+            messages: [...state.messages, placeholder],
+          );
+          _persistMessage(placeholder);
+        }
+
+        final audioTriggered = await _commitResponse();
         if (!audioTriggered) {
-          state = state.copyWith(sessionState: ChatSessionState.listening);
+          // Text-only response: go idle and wait for the user to tap the mic
+          // to continue. This prevents the mic from staying on indefinitely.
+          state = state.copyWith(sessionState: ChatSessionState.idle);
+          _pushWidgetState('idle');
         }
         // If audio was triggered, _playBufferedAudio() handles state transitions
       });
@@ -255,11 +268,14 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       _audioPipeline = AudioPipeline(llmProvider: llmProvider);
 
       await _audioPipeline!.startListening();
-      state = state.copyWith(sessionState: ChatSessionState.listening);
 
-      _addSystemMessage('Listening...');
+      // Allow server-side VAD to stabilize before the user is told to speak.
+      // The mic is already recording so the VAD can calibrate on ambient audio.
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      state = state.copyWith(sessionState: ChatSessionState.listening);
       _pushWidgetState('listening');
-      _log.info('Chat session started');
+      _log.info('VAD warm-up complete; chat session ready');
     } catch (e, stack) {
       _log.severe('Failed to start session', e, stack);
       state = state.copyWith(
@@ -282,17 +298,14 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // to prevent race condition where _playBufferedAudio() fires after
     // we set state to idle.
     await _audioPlayer.stop();
+    _playbackCompleteSub?.cancel();
+    _playbackCompleteSub = null;
     _audioBuffer.clear();
-    _commitResponse();
+    await _commitResponse();
     await _audioPipeline?.stopListening();
-    // Remove stale "Listening..." system message when session ends
-    final cleanedMessages = state.messages
-        .where((m) => !(m.isSystem && m.text == 'Listening...'))
-        .toList();
     state = state.copyWith(
       sessionState: ChatSessionState.idle,
       toolStatus: '',
-      messages: cleanedMessages,
     );
     _pushWidgetState('idle');
   }
@@ -301,6 +314,8 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   Future<void> endSession() async {
     // Stop any active audio playback before tearing down the session
     await _audioPlayer.stop();
+    _playbackCompleteSub?.cancel();
+    _playbackCompleteSub = null;
     _audioBuffer.clear();
     await _audioPipeline?.dispose();
     _audioPipeline = null;
@@ -314,14 +329,9 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     final llmProvider = _ref.read(llmProviderProvider);
     await llmProvider.disconnect();
 
-    // Remove stale "Listening..." system message
-    final cleanedMessages = state.messages
-        .where((m) => !(m.isSystem && m.text == 'Listening...'))
-        .toList();
     state = state.copyWith(
       sessionState: ChatSessionState.idle,
       toolStatus: '',
-      messages: cleanedMessages,
     );
     _pushWidgetState('idle');
     _log.info('Chat session ended');
@@ -368,6 +378,8 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // a new prompt so the speaking state doesn't overwrite thinking.
     if (state.sessionState == ChatSessionState.speaking) {
       await _audioPlayer.stop();
+      _playbackCompleteSub?.cancel();
+      _playbackCompleteSub = null;
       _audioBuffer.clear();
       if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
         _playbackCompleter!.complete();
@@ -403,15 +415,54 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     if (state.sessionState == ChatSessionState.idle ||
         state.sessionState == ChatSessionState.error) {
       // Commit current response as a message before starting new session
-      _commitResponse();
+      await _commitResponse();
       await startSession();
     } else if (state.sessionState == ChatSessionState.listening ||
                state.sessionState == ChatSessionState.thinking ||
                state.sessionState == ChatSessionState.speaking) {
-      _commitResponse();
+      await _commitResponse();
       await stopListening();
     }
     // connecting state: do nothing (let connection establish)
+  }
+
+  /// Explicitly stop the model's in-progress response and prepare for
+  /// fresh user input. This is the UI-driven equivalent of barge-in.
+  Future<void> stopResponding() async {
+    _log.info('Stop button pressed: aborting model response');
+
+    _abortPlaybackAndClearBuffers();
+
+    // Discard any partial response text
+    if (state.currentResponse.isNotEmpty) {
+      state = state.copyWith(currentResponse: '');
+    }
+
+    // Reset commit guard in case a commit was interrupted
+    _isCommitting = false;
+
+    // Transition to listening so the user can immediately speak again.
+    // The new audio will naturally interrupt the model on the server side.
+    state = state.copyWith(sessionState: ChatSessionState.listening);
+    _pushWidgetState('listening');
+    await _audioPipeline?.startListening();
+  }
+
+  /// Shared helper: stop any active playback and clear audio buffers.
+  /// Used by barge-in, the Stop button, and stopListening.
+  void _abortPlaybackAndClearBuffers() {
+    _audioPlayer.stop();
+    _audioBuffer.clear();
+    // Cancel the onPlayerComplete subscription to avoid a leak.
+    _playbackCompleteSub?.cancel();
+    _playbackCompleteSub = null;
+    // Resolve any pending playback completer so _playBufferedAudio()
+    // doesn't leak waiting on a 30s timeout after we've already stopped.
+    if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
+      _playbackCompleter!.complete();
+    }
+    _playbackCompleter = null;
+    _isPlayingAudio = false;
   }
 
   /// Execute a tool call from the LLM
@@ -484,11 +535,11 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
 
   /// Commits the current streaming response to message history.
   /// Returns true if audio playback was triggered.
-  bool _commitResponse() {
+  Future<bool> _commitResponse() async {
     // Guard against duplicate commits — turnComplete, stopListening,
     // and toggleListening can all call this in quick succession.
     if (_isCommitting) {
-      _log.info('_commitResponse: already committing, skipping');
+      _log.fine('_commitResponse: already committing, skipping');
       return false;
     }
     _isCommitting = true;
@@ -496,7 +547,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     final hasText = state.currentResponse.isNotEmpty;
     final hasAudio = _audioBuffer.isNotEmpty;
 
-    _log.info('_commitResponse: hasText=$hasText hasAudio=$hasAudio '
+    _log.fine('_commitResponse: hasText=$hasText hasAudio=$hasAudio '
         'textLen=${state.currentResponse.length} audioLen=${_audioBuffer.length}');
 
     if (hasText) {
@@ -537,7 +588,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // Play audio regardless of whether text arrived — native audio
     // models (audioOnly) send only InlineDataPart, no TextPart.
     if (hasAudio) {
-      _playBufferedAudio();
+      await _playBufferedAudio();
       _isCommitting = false;
       return true;
     }
@@ -555,7 +606,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // Don't start a new playback if one is already in progress
     // (e.g. back-to-back turnComplete events).
     if (_isPlayingAudio) {
-      _log.info('_playBufferedAudio: already playing, skipping');
+      _log.fine('_playBufferedAudio: already playing, skipping');
       return;
     }
 
@@ -565,6 +616,11 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     _isPlayingAudio = true;
     state = state.copyWith(sessionState: ChatSessionState.speaking);
     _pushWidgetState('speaking');
+
+    // Pause mic capture during playback to prevent acoustic echo
+    // (JARVIS hearing its own TTS through the speaker and treating
+    // it as user speech). Restarted in the finally block below.
+    await _audioPipeline?.stopListening();
 
     try {
       // Upsample 24 kHz → 48 kHz (2× nearest-neighbour) so Android
@@ -588,22 +644,23 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       // not when it finishes, so we use onPlayerComplete.
       _playbackCompleter = Completer<void>();
       final completer = _playbackCompleter!;
-      late StreamSubscription<void> completeSub;
-      completeSub = _audioPlayer.onPlayerComplete.listen((_) {
+      _playbackCompleteSub = _audioPlayer.onPlayerComplete.listen((_) {
         _log.info('Audio playback completed');
-        completeSub.cancel();
+        _playbackCompleteSub?.cancel();
+        _playbackCompleteSub = null;
         if (!completer.isCompleted) completer.complete();
       });
 
       await _audioPlayer.play(BytesSource(wavBytes));
-      _log.info('Playing TTS audio (${resampled.length} resampled → '
+      _log.fine('Playing TTS audio (${resampled.length} resampled → '
           '${wavBytes.length} WAV bytes)');
 
       // Wait for playback to finish (with timeout safety)
       await completer.future.timeout(
         const Duration(seconds: 30),
         onTimeout: () {
-          completeSub.cancel();
+          _playbackCompleteSub?.cancel();
+          _playbackCompleteSub = null;
           _log.warning('Audio playback timed out after 30s');
         },
       );
@@ -612,13 +669,15 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     } finally {
       _isPlayingAudio = false;
       _playbackCompleter = null;
-      // Return to listening state after playback completes,
-      // unless interrupted (barge-in may have changed the state)
-      // or a new text prompt set it to thinking.
+      // Turn-based interaction: after JARVIS finishes speaking, go idle
+      // and turn the mic off. The user must explicitly tap the mic to
+      // continue. This addresses the "microphone stays on" complaint.
       if (state.sessionState == ChatSessionState.speaking) {
-        state = state.copyWith(sessionState: ChatSessionState.listening);
-        _pushWidgetState('listening');
+        state = state.copyWith(sessionState: ChatSessionState.idle);
+        _pushWidgetState('idle');
       }
+      // Mic is intentionally NOT restarted here. The user taps the mic
+      // button to start the next exchange.
     }
   }
 

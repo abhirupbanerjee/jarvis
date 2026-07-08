@@ -16,9 +16,9 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // ── Setup structured logging ──
-  // Use verbose logs in debug builds; limit to warnings+ in release
+  // Use INFO+ in debug builds; limit to warnings+ in release
   // to avoid thousands of debugPrint calls per voice session.
-  Logger.root.level = kDebugMode ? Level.ALL : Level.WARNING;
+  Logger.root.level = kDebugMode ? Level.INFO : Level.WARNING;
   Logger.root.onRecord.listen((record) {
     final time = record.time.toIso8601String().substring(11, 23);
     final level = record.level.name.padRight(7);

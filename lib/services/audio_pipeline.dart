@@ -46,12 +46,12 @@ class AudioPipeline {
     if (_state == AudioPipelineState.listening) return;
 
     _setState(AudioPipelineState.initializing);
-    _log.info('startListening: checking mic permission...');
+    _log.fine('startListening: checking mic permission...');
 
     try {
       // Check microphone permission
       final hasPermission = await _recorder.hasPermission();
-      _log.info('startListening: hasPermission=$hasPermission');
+      _log.fine('startListening: hasPermission=$hasPermission');
       if (!hasPermission) {
         _setState(AudioPipelineState.error);
         _log.warning('Microphone permission denied');
@@ -60,7 +60,7 @@ class AudioPipeline {
       }
 
       // Start recording stream — 16kHz PCM16 mono
-      _log.info('startListening: calling _recorder.startStream()...');
+      _log.fine('startListening: calling _recorder.startStream()...');
       final stream = await _recorder.startStream(
         const RecordConfig(
           encoder: AudioEncoder.pcm16bits,
@@ -68,7 +68,7 @@ class AudioPipeline {
           numChannels: 1,
         ),
       );
-      _log.info('startListening: stream obtained, setting up listener');
+      _log.fine('startListening: stream obtained, setting up listener');
 
       _setState(AudioPipelineState.listening);
       _log.info('Audio recording started');
@@ -77,12 +77,12 @@ class AudioPipeline {
       _audioSubscription = stream.listen(
         (audioFrame) {
           _framesCaptured++;
-          // Periodic metering: log RMS level every 50 frames (~5s)
+          // Periodic metering: log RMS level every 200 frames (~20s)
           // to help debug "no response" / silent-mic issues.
-          if (_framesCaptured % 50 == 1) {
+          if (_framesCaptured % 200 == 1) {
             final rms = _computeRms(audioFrame);
             final level = (rms / 32768 * 100).round().clamp(0, 100);
-            _log.info('Mic meter: frame #$_framesCaptured, '
+            _log.fine('Mic meter: frame #$_framesCaptured, '
                 '${audioFrame.length}B, level=$level%');
           }
           _llmProvider.sendAudio(audioFrame);
@@ -93,11 +93,11 @@ class AudioPipeline {
           onError?.call(error);
         },
         onDone: () {
-          _log.info('Audio stream ended');
+          _log.fine('Audio stream ended');
           _setState(AudioPipelineState.idle);
         },
       );
-      _log.info('startListening: listener attached, streaming audio');
+      _log.fine('startListening: listener attached, streaming audio');
     } catch (e) {
       _log.severe('Failed to start audio recording: $e');
       _setState(AudioPipelineState.error);
