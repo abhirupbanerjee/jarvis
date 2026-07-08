@@ -1,16 +1,21 @@
 // lib/main.dart — J.A.R.V.I.S. Phase 1 Entry Point
 
+import 'dart:async';
+
 import 'package:alarm/alarm.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_soloud/flutter_soloud.dart';
 import 'package:home_widget/home_widget.dart';
 import 'package:logging/logging.dart';
 
 import 'providers/auth_provider.dart';
 import 'ui/screens/auth_screen.dart';
 import 'ui/screens/home_screen.dart';
+
+final _log = Logger('Main');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -42,14 +47,45 @@ Future<void> main() async {
   // Initialize alarm service for in-app alarm tools
   await Alarm.init();
 
+  // Initialize low-latency audio engine for Gemini Live streaming playback
+  try {
+    await SoLoud.instance.init();
+    _log.info('SoLoud audio engine initialized');
+  } catch (e, stack) {
+    _log.warning('Failed to initialize SoLoud', e, stack);
+  }
+
   // Register home screen widget group
   HomeWidget.setAppGroupId('com.jarvis.jarvis');
 
   runApp(
     const ProviderScope(
-      child: JarvisApp(),
+      child: _SoLoudLifecycleWrapper(
+        child: JarvisApp(),
+      ),
     ),
   );
+}
+
+/// Ensures SoLoud is deinitialized when the root widget is disposed.
+class _SoLoudLifecycleWrapper extends StatefulWidget {
+  final Widget child;
+  const _SoLoudLifecycleWrapper({required this.child});
+
+  @override
+  State<_SoLoudLifecycleWrapper> createState() => _SoLoudLifecycleWrapperState();
+}
+
+class _SoLoudLifecycleWrapperState extends State<_SoLoudLifecycleWrapper> {
+  @override
+  Widget build(BuildContext context) => widget.child;
+
+  @override
+  void dispose() {
+    // Deinit is synchronous in this version of flutter_soloud.
+    SoLoud.instance.deinit();
+    super.dispose();
+  }
 }
 
 class JarvisApp extends StatelessWidget {

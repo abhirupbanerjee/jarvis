@@ -3,8 +3,8 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_soloud/flutter_soloud.dart';
 import 'package:home_widget/home_widget.dart';
 import 'package:logging/logging.dart';
 
@@ -93,23 +93,21 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   StreamSubscription? _interruptSub;
   StreamSubscription? _turnCompleteSub;
 
-  // Audio playback
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  final List<int> _audioBuffer = [];
-  bool _isPlayingAudio = false;
+  // Low-latency streaming audio playback via SoLoud
+  AudioSource? _soloudAudioSource;
+  SoundHandle? _soloudHandle;
+  StreamSubscription<void>? _audioStreamFinishedSub;
+  bool _isAudioStreamActive = false;
   bool _isCommitting = false;
-  Completer<void>? _playbackCompleter;
-  StreamSubscription<void>? _playbackCompleteSub;
+  DateTime? _firstAudioChunkTime;
+  int _audioBytesFed = 0;
 
-  // ─────────────────────────────────────────────
-  // Gemini native audio model outputs 24 kHz PCM.
-  // Android AudioTrack exhibits stutter at non-
-  // standard rates, so we upsample to 48 kHz
-  // (2× nearest-neighbour) before WAV encoding.
-  // ─────────────────────────────────────────────
-  static const _playbackSampleRate = 48000;
-  static const _geminiBitsPerSample = 16;
-  static const _geminiChannels = 1;
+  // Gemini native audio model outputs 24 kHz PCM16 mono.
+  static const _geminiSampleRate = 24000;
+
+  // (We no longer resample to 48 kHz; SoLoud streams the native 24 kHz
+  // PCM directly. Android's AudioFlinger resamples 24 kHz → 48 kHz using
+  // a simple 1:2 ratio, which is efficient and low-latency.)
 
   ChatNotifier(this._ref) : super(ChatSessionData.initial);
 
@@ -123,6 +121,11 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   /// Start a new chat session — connect to Gemini Live and begin listening
   Future<void> startSession() async {
     if (state.sessionState != ChatSessionState.idle) return;
+
+    // Clean up any stale subscriptions from a previous session before
+    // starting a fresh one. This prevents duplicate audio/text streams
+    // when the user taps the mic after a completed turn.
+    await _cancelSubscriptions();
 
     state = state.copyWith(sessionState: ChatSessionState.connecting);
 
@@ -187,12 +190,14 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         },
       );
 
-      // Wire up audio stream — buffer PCM data for TTS playback
-      _audioBuffer.clear();
+      // Wire up audio stream — feed PCM chunks directly to SoLoud for
+      // low-latency streaming playback. Audio starts as soon as the first
+      // chunk arrives, not at turnComplete.
+      _audioBytesFed = 0;
+      _firstAudioChunkTime = null;
       _audioSub = llmProvider.audioStream.listen(
         (pcmChunk) {
-          _log.fine('Audio chunk: ${pcmChunk.length} bytes');
-          _audioBuffer.addAll(pcmChunk);
+          _feedAudioChunk(Uint8List.fromList(pcmChunk));
         },
         onError: (e) {
           _log.warning('Audio stream error: $e');
@@ -209,7 +214,9 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         }
       });
 
-      // Wire up turn-complete stream — auto-commit when model finishes generating
+      // Wire up turn-complete stream — auto-commit when model finishes generating.
+      // With SoLoud streaming, audio is already playing; turnComplete just tells
+      // the stream no more data is coming and commits any text.
       _turnCompleteSub = llmProvider.turnCompleteStream.listen((_) async {
         _log.info('Turn complete — committing response');
 
@@ -228,14 +235,26 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
           _persistMessage(placeholder);
         }
 
-        final audioTriggered = await _commitResponse();
-        if (!audioTriggered) {
-          // Text-only response: go idle and wait for the user to tap the mic
-          // to continue. This prevents the mic from staying on indefinitely.
+        final audioStarted = _isAudioStreamActive;
+        await _commitResponse();
+
+        // Tell SoLoud to finish playing whatever is buffered.
+        if (_soloudAudioSource != null) {
+          final elapsed = _firstAudioChunkTime != null
+              ? DateTime.now().difference(_firstAudioChunkTime!).inMilliseconds
+              : 0;
+          _log.info('Turn complete — marking SoLoud stream as ended '
+              '(audio streamed for ${elapsed}ms, $_audioBytesFed bytes fed)');
+          SoLoud.instance.setDataIsEnded(_soloudAudioSource!);
+        }
+
+        if (!audioStarted) {
+          // Text-only or no audio response: go idle now.
           state = state.copyWith(sessionState: ChatSessionState.idle);
           _pushWidgetState('idle');
         }
-        // If audio was triggered, _playBufferedAudio() handles state transitions
+        // If audio was started, allInstancesFinished transitions to idle once
+        // the buffered stream finishes playing.
       });
 
       // Connect to Gemini Live with all tools (AFTER setting up listeners)
@@ -294,13 +313,10 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
         state.sessionState != ChatSessionState.speaking) {
       return;
     }
-    // Stop any in-progress or pending audio playback before committing
-    // to prevent race condition where _playBufferedAudio() fires after
-    // we set state to idle.
-    await _audioPlayer.stop();
-    _playbackCompleteSub?.cancel();
-    _playbackCompleteSub = null;
-    _audioBuffer.clear();
+    // Stop any in-progress audio stream before committing to prevent a
+    // race where the allInstancesFinished callback transitions us back to
+    // speaking after we've gone idle.
+    _stopAudioStream();
     await _commitResponse();
     await _audioPipeline?.stopListening();
     state = state.copyWith(
@@ -310,21 +326,32 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     _pushWidgetState('idle');
   }
 
+  /// Cancel all stream subscriptions without disconnecting the LLM provider.
+  /// Used by startSession() to ensure a clean slate when re-entering from idle.
+  Future<void> _cancelSubscriptions() async {
+    await _textSub?.cancel();
+    _textSub = null;
+    await _toolSub?.cancel();
+    _toolSub = null;
+    await _connectionSub?.cancel();
+    _connectionSub = null;
+    await _audioSub?.cancel();
+    _audioSub = null;
+    await _interruptSub?.cancel();
+    _interruptSub = null;
+    await _turnCompleteSub?.cancel();
+    _turnCompleteSub = null;
+    // Stop any lingering audio stream.
+    _stopAudioStream();
+  }
+
   /// End the chat session completely
   Future<void> endSession() async {
-    // Stop any active audio playback before tearing down the session
-    await _audioPlayer.stop();
-    _playbackCompleteSub?.cancel();
-    _playbackCompleteSub = null;
-    _audioBuffer.clear();
+    // Stop any active audio stream and cancel subscriptions before tearing
+    // down the session.
+    await _cancelSubscriptions();
     await _audioPipeline?.dispose();
     _audioPipeline = null;
-    await _textSub?.cancel();
-    await _toolSub?.cancel();
-    await _connectionSub?.cancel();
-    await _audioSub?.cancel();
-    await _interruptSub?.cancel();
-    await _turnCompleteSub?.cancel();
 
     final llmProvider = _ref.read(llmProviderProvider);
     await llmProvider.disconnect();
@@ -377,14 +404,7 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // If JARVIS is currently speaking, stop playback before sending
     // a new prompt so the speaking state doesn't overwrite thinking.
     if (state.sessionState == ChatSessionState.speaking) {
-      await _audioPlayer.stop();
-      _playbackCompleteSub?.cancel();
-      _playbackCompleteSub = null;
-      _audioBuffer.clear();
-      if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
-        _playbackCompleter!.complete();
-      }
-      _isPlayingAudio = false;
+      _stopAudioStream();
     }
 
     // Add user message to chat history
@@ -448,21 +468,10 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     await _audioPipeline?.startListening();
   }
 
-  /// Shared helper: stop any active playback and clear audio buffers.
+  /// Shared helper: stop any active audio stream and clear playback state.
   /// Used by barge-in, the Stop button, and stopListening.
   void _abortPlaybackAndClearBuffers() {
-    _audioPlayer.stop();
-    _audioBuffer.clear();
-    // Cancel the onPlayerComplete subscription to avoid a leak.
-    _playbackCompleteSub?.cancel();
-    _playbackCompleteSub = null;
-    // Resolve any pending playback completer so _playBufferedAudio()
-    // doesn't leak waiting on a 30s timeout after we've already stopped.
-    if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
-      _playbackCompleter!.complete();
-    }
-    _playbackCompleter = null;
-    _isPlayingAudio = false;
+    _stopAudioStream();
   }
 
   /// Execute a tool call from the LLM
@@ -534,21 +543,21 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
   }
 
   /// Commits the current streaming response to message history.
-  /// Returns true if audio playback was triggered.
+  /// Returns true if an audio stream was active during this response.
   Future<bool> _commitResponse() async {
     // Guard against duplicate commits — turnComplete, stopListening,
     // and toggleListening can all call this in quick succession.
     if (_isCommitting) {
       _log.fine('_commitResponse: already committing, skipping');
-      return false;
+      return _isAudioStreamActive;
     }
     _isCommitting = true;
 
     final hasText = state.currentResponse.isNotEmpty;
-    final hasAudio = _audioBuffer.isNotEmpty;
+    final audioStarted = _isAudioStreamActive;
 
-    _log.fine('_commitResponse: hasText=$hasText hasAudio=$hasAudio '
-        'textLen=${state.currentResponse.length} audioLen=${_audioBuffer.length}');
+    _log.fine('_commitResponse: hasText=$hasText audioStarted=$audioStarted '
+        'textLen=${state.currentResponse.length} audioBytesFed=$_audioBytesFed');
 
     if (hasText) {
       final message = ChatMessage(
@@ -566,9 +575,9 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
 
       // Persist to database (fire-and-forget)
       _persistMessage(message);
-    } else if (hasAudio) {
+    } else if (audioStarted) {
       // Audio-only mode (gemini-2.5-flash-native-audio): no TextPart
-      // arrived, but we have audio. Insert a placeholder so the chat
+      // arrived, but audio was streamed. Insert a placeholder so the chat
       // history isn't empty and the user knows a response was given.
       final message = ChatMessage(
         text: '🎤 Voice response',
@@ -585,181 +594,123 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
       _persistMessage(message);
     }
 
-    // Play audio regardless of whether text arrived — native audio
-    // models (audioOnly) send only InlineDataPart, no TextPart.
-    if (hasAudio) {
-      await _playBufferedAudio();
-      _isCommitting = false;
-      return true;
-    }
     _isCommitting = false;
-    return false;
+    return audioStarted;
   }
 
-  // ── Audio Playback ──
+  // ── Streaming Audio Playback (SoLoud) ──
 
-  /// Play buffered PCM audio from Gemini TTS via audioplayers.
-  /// Resamples 24 kHz → 48 kHz then encodes to WAV for smooth
-  /// Android playback.
-  Future<void> _playBufferedAudio() async {
-    if (_audioBuffer.isEmpty) return;
-    // Don't start a new playback if one is already in progress
-    // (e.g. back-to-back turnComplete events).
-    if (_isPlayingAudio) {
-      _log.fine('_playBufferedAudio: already playing, skipping');
+  /// Feed a PCM chunk from Gemini Live into the SoLoud buffer stream.
+  /// On the first chunk, a new stream is created, playback starts, and the
+  /// state transitions to speaking. Subsequent chunks are appended directly.
+  Future<void> _feedAudioChunk(Uint8List chunk) async {
+    if (chunk.isEmpty) return;
+
+    // Defensive guard: if the audio subscription has been canceled (e.g. the
+    // session is being torn down or a new session is starting), drop the chunk
+    // instead of feeding it into a stale or future stream.
+    if (_audioSub == null) {
+      _log.fine('Dropping audio chunk from stale subscription: ${chunk.length} bytes');
       return;
     }
 
-    _log.info('Playing TTS audio: ${_audioBuffer.length} raw PCM bytes');
-
-    // Signal that JARVIS is speaking
-    _isPlayingAudio = true;
-    state = state.copyWith(sessionState: ChatSessionState.speaking);
-    _pushWidgetState('speaking');
-
-    // Pause mic capture during playback to prevent acoustic echo
-    // (JARVIS hearing its own TTS through the speaker and treating
-    // it as user speech). Restarted in the finally block below.
-    await _audioPipeline?.stopListening();
-
     try {
-      // Upsample 24 kHz → 48 kHz (2× nearest-neighbour) so Android
-      // AudioTrack handles the stream natively without resampling.
-      final resampled = _resample24to48(Uint8List.fromList(_audioBuffer));
-      final wavBytes = _pcmToWav(
-        pcmData: resampled,
-        sampleRate: _playbackSampleRate,
-        bitsPerSample: _geminiBitsPerSample,
-        channels: _geminiChannels,
-      );
+      // Lazy-create the SoLoud buffer stream on the first chunk of a turn.
+      if (_soloudAudioSource == null) {
+        _firstAudioChunkTime = DateTime.now();
+        _soloudAudioSource = SoLoud.instance.setBufferStream(
+          bufferingType: BufferingType.released,
+          sampleRate: _geminiSampleRate,
+          channels: Channels.mono,
+          format: BufferType.s16le,
+        );
+        // Disable auto-dispose so we can safely stop/dispose the source
+        // ourselves without racing the native engine.
+        _soloudAudioSource!.autoDispose = false;
+        _isAudioStreamActive = true;
+        _audioBytesFed = 0;
 
-      await _audioPlayer.stop(); // Stop any previous playback
+        _log.info('SoLoud stream started — first chunk: ${chunk.length} bytes');
 
-      // Buffer data has been copied into the WAV; clear now so a
-      // concurrent turnComplete doesn't replay the same audio.
-      _audioBuffer.clear();
+        // Transition to speaking and pause mic capture to avoid echo.
+        state = state.copyWith(sessionState: ChatSessionState.speaking);
+        _pushWidgetState('speaking');
+        _audioPipeline?.stopListening();
 
-      // Wait for playback to complete before transitioning state.
-      // audioplayers' play() returns as soon as playback *starts*,
-      // not when it finishes, so we use onPlayerComplete.
-      _playbackCompleter = Completer<void>();
-      final completer = _playbackCompleter!;
-      _playbackCompleteSub = _audioPlayer.onPlayerComplete.listen((_) {
-        _log.info('Audio playback completed');
-        _playbackCompleteSub?.cancel();
-        _playbackCompleteSub = null;
-        if (!completer.isCompleted) completer.complete();
-      });
+        _soloudHandle = SoLoud.instance.play(_soloudAudioSource!);
+        _log.info('SoLoud playback started, handle=$_soloudHandle');
 
-      await _audioPlayer.play(BytesSource(wavBytes));
-      _log.fine('Playing TTS audio (${resampled.length} resampled → '
-          '${wavBytes.length} WAV bytes)');
-
-      // Wait for playback to finish (with timeout safety)
-      await completer.future.timeout(
-        const Duration(seconds: 30),
-        onTimeout: () {
-          _playbackCompleteSub?.cancel();
-          _playbackCompleteSub = null;
-          _log.warning('Audio playback timed out after 30s');
-        },
-      );
-    } catch (e) {
-      _log.warning('Audio playback failed: $e');
-    } finally {
-      _isPlayingAudio = false;
-      _playbackCompleter = null;
-      // Turn-based interaction: after JARVIS finishes speaking, go idle
-      // and turn the mic off. The user must explicitly tap the mic to
-      // continue. This addresses the "microphone stays on" complaint.
-      if (state.sessionState == ChatSessionState.speaking) {
-        state = state.copyWith(sessionState: ChatSessionState.idle);
-        _pushWidgetState('idle');
+        // Listen for the stream to finish so we can transition to idle.
+        _audioStreamFinishedSub = _soloudAudioSource!.allInstancesFinished.listen(
+          (_) {
+            _log.info('SoLoud stream finished');
+            _finalizeSpeaking();
+          },
+          onError: (e) {
+            _log.warning('SoLoud allInstancesFinished error: $e');
+            _finalizeSpeaking();
+          },
+        );
       }
-      // Mic is intentionally NOT restarted here. The user taps the mic
-      // button to start the next exchange.
+
+      SoLoud.instance.addAudioDataStream(_soloudAudioSource!, chunk);
+      _audioBytesFed += chunk.length;
+      final elapsed = _firstAudioChunkTime != null
+          ? DateTime.now().difference(_firstAudioChunkTime!).inMilliseconds
+          : 0;
+      _log.fine('Audio chunk fed: ${chunk.length} bytes '
+          '(total $_audioBytesFed, elapsed ${elapsed}ms)');
+    } catch (e, st) {
+      _log.severe('Failed to feed audio chunk to SoLoud', e, st);
     }
   }
 
-  /// Nearest-neighbour upsample 24 000 → 48 000 Hz (2×).
-  /// Each 16-bit mono sample is duplicated once so the waveform
-  /// shape is preserved while making the rate Android-friendly.
-  static Uint8List _resample24to48(Uint8List pcm24) {
-    // Guard against misaligned PCM data (shouldn't happen with PCM16,
-    // but a network interruption could produce an odd-length chunk)
-    if (pcm24.length % 2 != 0) {
-      _log.warning(
-        'PCM data has odd length (${pcm24.length}), dropping last byte');
+  /// Called when the SoLoud stream has finished playing. Cleans up the stream
+  /// and transitions the chat back to idle.
+  void _finalizeSpeaking() {
+    final elapsed = _firstAudioChunkTime != null
+        ? DateTime.now().difference(_firstAudioChunkTime!).inMilliseconds
+        : 0;
+    _stopAudioStream();
+    if (state.sessionState == ChatSessionState.speaking) {
+      state = state.copyWith(sessionState: ChatSessionState.idle);
+      _pushWidgetState('idle');
+      _log.info('Audio playback finished — transitioned to idle '
+          '(total audio duration ${elapsed}ms)');
     }
-    // 16-bit mono → 2 bytes per sample
-    final samples = pcm24.length ~/ 2;
-    final out = Uint8List(samples * 4); // 2× samples, 2 bytes each
-    for (int i = 0; i < samples; i++) {
-      final lo = pcm24[i * 2];
-      final hi = pcm24[i * 2 + 1];
-      // Write the same sample twice (nearest-neighbour 2×)
-      final dst = i * 4;
-      out[dst] = lo;
-      out[dst + 1] = hi;
-      out[dst + 2] = lo;
-      out[dst + 3] = hi;
-    }
-    return out;
   }
 
-  /// Encode raw 16-bit PCM samples into a WAV container.
-  /// Returns the complete .wav file as bytes (44-byte header + data).
-  static Uint8List _pcmToWav({
-    required Uint8List pcmData,
-    required int sampleRate,
-    required int bitsPerSample,
-    required int channels,
-  }) {
-    final byteRate = sampleRate * channels * bitsPerSample ~/ 8;
-    final blockAlign = channels * bitsPerSample ~/ 8;
-    final dataSize = pcmData.length;
-    final fileSize = 36 + dataSize;
-
-    final header = ByteData(44);
-    int offset = 0;
-
-    // RIFF header
-    header.setUint8(offset, 0x52); // 'R'
-    header.setUint8(offset + 1, 0x49); // 'I'
-    header.setUint8(offset + 2, 0x46); // 'F'
-    header.setUint8(offset + 3, 0x46); // 'F'
-    header.setUint32(offset + 4, fileSize, Endian.little);
-    offset += 8;
-
-    // WAVEfmt 
-    header.setUint8(offset, 0x57); // 'W'
-    header.setUint8(offset + 1, 0x41); // 'A'
-    header.setUint8(offset + 2, 0x56); // 'V'
-    header.setUint8(offset + 3, 0x45); // 'E'
-    header.setUint8(offset + 4, 0x66); // 'f'
-    header.setUint8(offset + 5, 0x6D); // 'm'
-    header.setUint8(offset + 6, 0x74); // 't'
-    header.setUint8(offset + 7, 0x20); // ' '
-    header.setUint32(offset + 8, 16, Endian.little); // Subchunk1 size (PCM = 16)
-    header.setUint16(offset + 12, 1, Endian.little); // Audio format (1 = PCM)
-    header.setUint16(offset + 14, channels, Endian.little);
-    header.setUint32(offset + 16, sampleRate, Endian.little);
-    header.setUint32(offset + 20, byteRate, Endian.little);
-    header.setUint16(offset + 24, blockAlign, Endian.little);
-    header.setUint16(offset + 26, bitsPerSample, Endian.little);
-    offset += 28;
-
-    // data subchunk
-    header.setUint8(offset, 0x64); // 'd'
-    header.setUint8(offset + 1, 0x61); // 'a'
-    header.setUint8(offset + 2, 0x74); // 't'
-    header.setUint8(offset + 3, 0x61); // 'a'
-    header.setUint32(offset + 4, dataSize, Endian.little);
-
-    return Uint8List.fromList([
-      ...header.buffer.asUint8List(),
-      ...pcmData,
-    ]);
+  /// Stop the active SoLoud stream and release its resources. Safe to call
+  /// multiple times; used by barge-in, stopListening, endSession, and dispose.
+  void _stopAudioStream() {
+    _audioStreamFinishedSub?.cancel();
+    _audioStreamFinishedSub = null;
+    if (_soloudHandle != null) {
+      try {
+        // Only stop the handle if it is still valid. If the stream has
+        // already finished naturally, stop() can hang on an invalid handle.
+        if (SoLoud.instance.getIsValidVoiceHandle(_soloudHandle!)) {
+          SoLoud.instance.stop(_soloudHandle!);
+        }
+      } catch (e) {
+        _log.fine('Error stopping SoLoud handle: $e');
+      }
+      _soloudHandle = null;
+    }
+    if (_soloudAudioSource != null) {
+      try {
+        // Signal end of data in case the stream is still active, then
+        // dispose the source to free native resources.
+        SoLoud.instance.setDataIsEnded(_soloudAudioSource!);
+        SoLoud.instance.disposeSource(_soloudAudioSource!);
+      } catch (e) {
+        _log.fine('Error disposing SoLoud source: $e');
+      }
+      _soloudAudioSource = null;
+    }
+    _isAudioStreamActive = false;
+    _audioBytesFed = 0;
+    _firstAudioChunkTime = null;
   }
 
   /// Persist a chat message to the database (fire-and-forget).
@@ -793,7 +744,6 @@ class ChatNotifier extends StateNotifier<ChatSessionData> {
     // synchronous. We cancel subscriptions synchronously to prevent
     // leaks, then let endSession() finish in the background.
     unawaited(endSession());
-    _audioPlayer.dispose();
     super.dispose();
   }
 }

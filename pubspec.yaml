@@ -19,7 +19,7 @@ dependencies:
 
   # ── Audio ──
   record: ^6.1.0                    # Audio capture (mic → Gemini Live)
-  audioplayers: ^6.1.0              # TTS audio playback
+  flutter_soloud: ^4.0.12           # Low-latency streaming PCM playback
 
   # ── Android Widget ──
   home_widget: ^0.9.3               # Home screen widget (tap to launch + listen)
